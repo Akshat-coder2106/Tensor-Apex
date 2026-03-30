@@ -72,6 +72,21 @@ CATEGORY_CLAIM_TERMS: dict[str, set[str]] = {
     "spam": {"spam", "phishing", "junk", "unsolicited"},
 }
 
+ATTACHMENT_SIGNAL_TERMS: dict[str, set[str]] = {
+    "duplicate_charge": {"duplicate", "twice", "double charge", "two transactions", "duplicate entries"},
+    "identity_mismatch": {"identity mismatch", "name mismatch", "different name", "identity"},
+    "high_value_charge": {"high value", "large amount", "high amount", "significant charge"},
+    "billing_ui": {"invoice", "statement", "billing", "screenshot"},
+    "multiple_payment_methods": {"multiple cards", "two cards", "payment methods", "different card"},
+    "amount_visible": {"amount", "charge", "payment", "line item", "total"},
+    "visible_damage": {"damage", "cracked", "broken", "defect"},
+    "packaging_intact": {"packaging intact", "box intact", "sealed packaging"},
+    "error_code_visible": {"error code", "error", "code", "failure"},
+    "mobile_ui": {"mobile", "app", "ios", "android", "screen"},
+    "amount_edited": {"amount edited", "edited amount", "tampered total", "modified total"},
+    "font_inconsistency": {"font inconsistency", "font mismatch", "misaligned text", "different font"},
+}
+
 
 def compute_issue_age_hours(snapshot: TicketSnapshot, now: datetime) -> float:
     first_timestamp = snapshot.thread[0].timestamp
@@ -127,6 +142,9 @@ def build_ground_truth_payload(
         "requires_specialist_review": scenario.ground_truth.requires_specialist_review,
         "adversarial_pattern": scenario.ground_truth.adversarial_pattern,
         "delayed_fraud_step_threshold": scenario.ground_truth.delayed_fraud_step_threshold,
+        "attachment_present": snapshot.attachment_present,
+        "attachment_summary": snapshot.vl_jepa_summary,
+        "attachment_signals": snapshot.vl_jepa_signals,
         "snapshot": snapshot.model_dump(mode="json"),
         "issue_age_hours": compute_issue_age_hours(snapshot, scenario.now),
     }
@@ -291,6 +309,172 @@ def _response_claimed_category(response_text: str) -> str | None:
     return best_category
 
 
+def _signal_terms(signal: str) -> set[str]:
+    if signal in ATTACHMENT_SIGNAL_TERMS:
+        return ATTACHMENT_SIGNAL_TERMS[signal]
+    fallback = signal.replace("_", " ")
+    first_token = signal.split("_")[0]
+    return {fallback, first_token}
+
+
+def _agent_surface_text(actions: list[Action]) -> str:
+    parts: list[str] = []
+    for action in actions:
+        for text in [action.response_text, action.fraud_reason, action.escalation_reason, action.reasoning]:
+            if text:
+                parts.append(text.lower())
+    return " ".join(parts)
+
+
+def _attachment_signal_utilization_score(actions: list[Action], ground_truth: GroundTruthPayload) -> float:
+    signals = list(ground_truth.get("attachment_signals", []) or [])
+    if not signals:
+        return 1.0
+
+    surface = _agent_surface_text(actions)
+    if not surface:
+        return 0.0
+
+    hits = 0
+    for signal in signals:
+        terms = _signal_terms(signal)
+        if any(term in surface for term in terms):
+            hits += 1
+
+    return round(min(1.0, hits / len(signals)), 4)
+
+
+def _multimodal_fraud_detection_score(actions: list[Action], ground_truth: GroundTruthPayload) -> float:
+    expected_flag_fraud = bool(ground_truth.get("expected_flag_fraud"))
+    if not expected_flag_fraud:
+        return 1.0
+
+    signals = list(ground_truth.get("attachment_signals", []) or [])
+    if not signals:
+        return _fraud_score(actions, ground_truth)
+
+    first_flag = next((action for action in actions if action.action_type == "flag_fraud"), None)
+    if first_flag is None:
+        return 0.0
+
+    reason_text = f"{first_flag.fraud_reason or ''} {first_flag.reasoning}".lower()
+    cited_visual_evidence = any(any(term in reason_text for term in _signal_terms(signal)) for signal in signals)
+    timeliness = _fraud_score(actions, ground_truth)
+    if cited_visual_evidence:
+        return timeliness
+    return round(0.7 * timeliness, 4)
+
+
+def context_usage_score(actions: list[Action], ground_truth: GroundTruthPayload) -> float:
+    history_keywords = list(ground_truth.get("history_keywords", []) or [])
+    if not history_keywords:
+        return 1.0
+
+    draft = latest_action(actions, "draft_response")
+    if draft is None or not draft.response_text:
+        return 0.5
+
+    lowered = draft.response_text.lower()
+    hits = sum(1 for keyword in history_keywords if keyword.lower() in lowered)
+    return round(min(1.0, hits / max(1, len(history_keywords))), 4)
+
+
+def _response_policy_citation_score(
+    response_text: str | None,
+    ground_truth: GroundTruthPayload,
+) -> float:
+    if not response_text:
+        return 0.0
+    lowered = response_text.lower()
+
+    required_signal_groups: list[list[str]] = []
+    if bool(ground_truth["expected_escalation"]):
+        required_signal_groups.append(["escalat", "specialist", "review", "senior team"])
+    if bool(ground_truth["expected_flag_fraud"]):
+        required_signal_groups.append(["fraud", "risk", "security", "verification"])
+    if bool(ground_truth["requires_request_info"]):
+        required_signal_groups.append(["confirm", "clarify", "details", "information"])
+    if ground_truth["policy_version"] == "v2":
+        required_signal_groups.append(["policy", "compliance", "required", "must"])
+
+    if not required_signal_groups:
+        return 1.0 if any(term in lowered for term in ["policy", "process", "review", "compliance"]) else 0.75
+
+    hits = sum(1 for group in required_signal_groups if any(signal in lowered for signal in group))
+    return round(hits / len(required_signal_groups), 4)
+
+
+def _response_resolution_completeness_score(response_text: str | None) -> float:
+    if not response_text:
+        return 0.0
+    lowered = response_text.lower()
+    timeline = any(signal in lowered for signal in ["today", "within", "hour", "day", "timeline", "next step"])
+    ownership = any(signal in lowered for signal in ["we ", "our team", "assigned", "owner", "i will"])
+    concrete_next_step = any(
+        signal in lowered
+        for signal in ["follow up", "investigat", "review", "update", "resolve", "diagnos", "confirm"]
+    )
+    return round((float(timeline) + float(ownership) + float(concrete_next_step)) / 3.0, 4)
+
+
+def _response_tone_score(response_text: str | None) -> float:
+    if not response_text:
+        return 0.0
+    lowered = response_text.lower()
+    empathy = any(signal in lowered for signal in ["sorry", "understand", "appreciate", "frustrat", "thank you"])
+    professionalism = any(signal in lowered for signal in ["please", "will", "review", "assist", "update"])
+    hostile = any(
+        signal in lowered
+        for signal in ["not our fault", "calm down", "you must", "you failed", "we can't help"]
+    )
+    base = (float(empathy) + float(professionalism)) / 2.0
+    if hostile:
+        base *= 0.4
+    return round(base, 4)
+
+
+def _response_accuracy_score(
+    response_text: str | None,
+    ground_truth: GroundTruthPayload,
+    actions: list[Action],
+) -> float:
+    if not response_text:
+        return 0.0
+    lowered = response_text.lower()
+    consistency = _response_action_consistency_score(actions, response_text)
+    grounding = _thread_grounding_score(response_text, ground_truth)
+
+    contradiction_penalty = 0.0
+    if bool(ground_truth["expected_escalation"]) and any(
+        phrase in lowered for phrase in ["no escalation", "won't escalate", "does not require escalation"]
+    ):
+        contradiction_penalty += 0.25
+    if bool(ground_truth["expected_flag_fraud"]) and any(
+        phrase in lowered for phrase in ["no fraud risk", "not fraud", "safe transaction"]
+    ):
+        contradiction_penalty += 0.25
+
+    score = max(0.0, 0.7 * consistency + 0.3 * grounding - contradiction_penalty)
+    return round(min(1.0, score), 4)
+
+
+def _response_rubric_score(
+    response_text: str | None,
+    ground_truth: GroundTruthPayload,
+    actions: list[Action],
+) -> float:
+    if not response_text:
+        return 0.0
+    policy_citation = _response_policy_citation_score(response_text, ground_truth)
+    resolution_completeness = _response_resolution_completeness_score(response_text)
+    tone = _response_tone_score(response_text)
+    accuracy = _response_accuracy_score(response_text, ground_truth, actions)
+    return round(
+        0.25 * policy_citation + 0.3 * resolution_completeness + 0.2 * tone + 0.25 * accuracy,
+        4,
+    )
+
+
 def _hybrid_response_score(
     response_text: str | None,
     keywords: list[str],
@@ -303,8 +487,10 @@ def _hybrid_response_score(
     thread_grounding = _thread_grounding_score(response_text, ground_truth)
     structure = _response_structure_score(response_text)
     consistency = _response_action_consistency_score(actions, response_text)
+    rubric = _response_rubric_score(response_text, ground_truth, actions)
+    blended_base = min(1.0, 0.35 * keyword_score + 0.3 * thread_grounding + 0.2 * structure + 0.15 * consistency)
     return round(
-        min(1.0, 0.35 * keyword_score + 0.3 * thread_grounding + 0.2 * structure + 0.15 * consistency),
+        min(1.0, 0.6 * blended_base + 0.4 * rubric),
         4,
     )
 
@@ -575,6 +761,24 @@ def medium_components(actions: list[Action], ground_truth: GroundTruthPayload) -
 
 def hard_grader(actions: list[Action], ground_truth: GroundTruthPayload) -> float:
     components = hard_components(actions, ground_truth)
+    has_attachment = bool(ground_truth.get("attachment_signals"))
+    if has_attachment:
+        return round(
+            0.04 * components["temporal_reasoning"]
+            + 0.06 * components["policy_compliance"]
+            + 0.1 * components["escalation_accuracy"]
+            + 0.12 * components["history_acknowledgment"]
+            + 0.1 * components["response_completeness"]
+            + 0.08 * components["fraud_handling"]
+            + 0.13 * components["specialist_coordination"]
+            + 0.15 * components["adversarial_resilience"]
+            + 0.06 * components["customer_quality"]
+            + 0.05 * components["clarification_strategy"]
+            + 0.05 * components["attachment_utilization"]
+            + 0.06 * components["multimodal_fraud"],
+            4,
+        )
+
     return round(
         0.04 * components["temporal_reasoning"]
         + 0.06 * components["policy_compliance"]
@@ -602,17 +806,25 @@ def hard_components(actions: list[Action], ground_truth: GroundTruthPayload) -> 
     )
     category_score = _categorize_score(actions, ground_truth["expected_category"])
     policy_score = 1.0 if _policy_score(actions, ground_truth) == 1.0 and category_score == 1.0 else 0.0
+    attachment_signals = list(ground_truth.get("attachment_signals", []) or [])
+    attachment_utilization = _attachment_signal_utilization_score(actions, ground_truth)
+    multimodal_fraud = _multimodal_fraud_detection_score(actions, ground_truth)
+    fraud_handling = _fraud_score(actions, ground_truth)
+    if attachment_signals and bool(ground_truth.get("expected_flag_fraud")):
+        fraud_handling = round(min(1.0, 0.5 * fraud_handling + 0.5 * multimodal_fraud), 4)
     return {
         "temporal_reasoning": _priority_score(actions, ground_truth["expected_priority"]),
         "policy_compliance": policy_score,
         "escalation_accuracy": _escalation_score(actions, ground_truth["expected_escalation"]),
         "history_acknowledgment": history_score,
         "response_completeness": response_keywords,
-        "fraud_handling": _fraud_score(actions, ground_truth),
+        "fraud_handling": fraud_handling,
         "specialist_coordination": _specialist_score(actions, bool(ground_truth["requires_specialist_review"])),
         "adversarial_resilience": _adversarial_consistency_score(actions, ground_truth),
         "customer_quality": _customer_quality_score(actions, ground_truth),
         "clarification_strategy": _clarification_strategy_score(actions, ground_truth),
+        "attachment_utilization": attachment_utilization,
+        "multimodal_fraud": multimodal_fraud,
     }
 
 
@@ -650,15 +862,24 @@ def evaluation_metrics(
     fraud_score = _fraud_score(actions, ground_truth)
     escalation_score = _escalation_score(actions, bool(ground_truth["expected_escalation"]))
     specialist_score = _specialist_score(actions, bool(ground_truth["requires_specialist_review"]))
+    multimodal_fraud = _multimodal_fraud_detection_score(actions, ground_truth)
+    attachment_utilization = _attachment_signal_utilization_score(actions, ground_truth)
     adversarial_resilience = _adversarial_consistency_score(actions, ground_truth)
     customer_quality = _customer_quality_score(actions, ground_truth)
+    memory_score_component = context_usage_score(actions, ground_truth)
     efficiency = 1.0 if cost_budget <= 0 else max(0.0, min(1.0, 1.0 - (action_cost / cost_budget)))
     latency = max(0.0, min(1.0, 1.0 - (len(actions) / max_steps))) if max_steps > 0 else 0.0
 
-    risk_management = round(
-        min(1.0, 0.45 * fraud_score + 0.35 * escalation_score + 0.2 * specialist_score),
-        4,
-    )
+    if ground_truth.get("attachment_signals"):
+        risk_management = round(
+            min(1.0, 0.35 * fraud_score + 0.25 * multimodal_fraud + 0.25 * escalation_score + 0.15 * specialist_score),
+            4,
+        )
+    else:
+        risk_management = round(
+            min(1.0, 0.45 * fraud_score + 0.35 * escalation_score + 0.2 * specialist_score),
+            4,
+        )
     return {
         "score": round(score, 4),
         "policy_score": round(policy_score, 4),
@@ -667,6 +888,9 @@ def evaluation_metrics(
         "customer_quality": round(customer_quality, 4),
         "risk_management": risk_management,
         "adversarial_resilience": round(adversarial_resilience, 4),
+        "memory_score_component": round(memory_score_component, 4),
+        "attachment_utilization": round(attachment_utilization, 4),
+        "multimodal_fraud": round(multimodal_fraud, 4),
     }
 
 
@@ -685,6 +909,12 @@ def failure_modes(
         failures.append("risk_handling_gap")
     if metrics["customer_quality"] < 0.55:
         failures.append("customer_communication_low")
+    if metrics.get("memory_score_component", 1.0) < 0.3:
+        failures.append("context_ignorance")
+    if metrics.get("attachment_utilization", 1.0) < 0.5:
+        failures.append("attachment_signal_miss")
+    if metrics.get("multimodal_fraud", 1.0) < 0.55:
+        failures.append("multimodal_fraud_miss")
     if metrics["efficiency"] < 0.25:
         failures.append("high_operational_cost")
     if done and metrics["latency"] < 0.2:

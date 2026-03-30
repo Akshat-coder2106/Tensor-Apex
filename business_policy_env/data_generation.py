@@ -21,6 +21,14 @@ from .models import (
 
 
 @dataclass
+class AttachmentSignals:
+    attachment_present: bool
+    attachment_path: str | None = None
+    vl_jepa_summary: str = ""
+    vl_jepa_signals: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ScenarioTemplate:
     scenario_id: str
     title: str
@@ -65,6 +73,7 @@ class ScenarioTemplate:
     expected_escalation_reason: str | None = None
     thread_directions: list[Literal["customer", "agent", "system"]] = field(default_factory=list)
     visible_problem_type: str | None = None
+    attachment: AttachmentSignals | None = None
 
 
 EASY_TEMPLATES: list[ScenarioTemplate] = [
@@ -605,6 +614,111 @@ MEDIUM_TEMPLATES: list[ScenarioTemplate] = [
         adversarial_pattern="keyword_refund_trap",
         max_steps=9,
         style_noise=True,
+        visible_problem_type="technical_support",
+    ),
+    ScenarioTemplate(
+        scenario_id="medium_hr_payroll_duplicate_adjustment_claim",
+        title="HR payroll duplicate-adjustment claim with conflicting history",
+        subject="Payroll correction still missing",
+        difficulty="medium",
+        sender_tier="standard",
+        account_flags=[],
+        refund_amount=420.0,
+        age_hours=21,
+        thread_bodies=[
+            "You still owe my travel reimbursement correction from March payroll.",
+            "Agent note from yesterday: Payroll adjustment PR-118 for $420 was already issued.",
+            "No it was not, send the same correction again today.",
+        ],
+        thread_directions=["customer", "agent", "customer"],
+        expected_category="billing",
+        expected_priority="medium",
+        expected_escalation=False,
+        requires_request_info=False,
+        request_info_first_required=False,
+        response_keywords=["already", "processed", "reference", "payroll"],
+        customer_quality_keywords=["review", "confirm", "reference", "update"],
+        history_keywords=["already issued", "PR-118", "send again today"],
+        clarification_keywords=[],
+        adversarial_tags=["strategic_deception", "history_conflict", "hr_ops"],
+        adversarial_pattern="refund_already_processed",
+        max_steps=9,
+        style_noise=True,
+        emotional_tone=True,
+        objective=(
+            "HR operations compliance: verify payroll-adjustment history and avoid duplicate payouts while "
+            "communicating clearly."
+        ),
+        visible_problem_type="hr_policy",
+    ),
+    ScenarioTemplate(
+        scenario_id="medium_finserv_kyc_keyword_trap",
+        title="FinServ keyword trap: refund phrasing hides KYC failure",
+        subject="Refund this now? KYC flow blocked",
+        difficulty="medium",
+        sender_tier="standard",
+        account_flags=[],
+        refund_amount=None,
+        age_hours=18,
+        thread_bodies=[
+            "Subject says refund, but the issue is our KYC verification app crashes before document upload.",
+            "Do not reverse funds yet, I need the verification flow fixed first.",
+        ],
+        expected_category="technical_support",
+        expected_priority="medium",
+        expected_escalation=False,
+        requires_request_info=True,
+        request_info_first_required=True,
+        response_keywords=["kyc", "verification", "diagnose", "support", "upload"],
+        customer_quality_keywords=["support", "review", "timeline", "update"],
+        history_keywords=["subject says refund", "crashes before document upload"],
+        clarification_keywords=["device", "version", "error code"],
+        clarification_body="Android 14, verification screen throws KYC-502 when uploading ID document.",
+        adversarial_tags=["leaderboard_trap", "mixed_intent", "finserv"],
+        adversarial_pattern="keyword_refund_trap",
+        max_steps=9,
+        style_noise=True,
+        objective=(
+            "Financial-services compliance support: separate payout language from technical KYC failure "
+            "and diagnose safely."
+        ),
+        visible_problem_type="financial_compliance",
+    ),
+    ScenarioTemplate(
+        scenario_id="medium_ambiguous_screenshot",
+        title="Ambiguous ticket resolved through screenshot summary",
+        subject="Attached screenshot: payment step fails",
+        difficulty="medium",
+        sender_tier="standard",
+        account_flags=[],
+        refund_amount=None,
+        age_hours=16,
+        thread_bodies=[
+            "Checkout keeps failing and I attached a screenshot, please fix this.",
+        ],
+        expected_category="technical_support",
+        expected_priority="medium",
+        expected_escalation=False,
+        requires_request_info=True,
+        request_info_first_required=True,
+        response_keywords=["error", "diagnose", "support", "update"],
+        customer_quality_keywords=["support", "review", "timeline", "update"],
+        history_keywords=["attached screenshot", "checkout keeps failing"],
+        clarification_keywords=["device", "version", "error code"],
+        clarification_body="iOS 18 app, error PAY-944 appears after tapping Confirm Payment.",
+        attachment=AttachmentSignals(
+            attachment_present=True,
+            attachment_path="images/medium_ambiguous_screenshot_001.png",
+            vl_jepa_summary=(
+                "Mobile screenshot shows checkout error code PAY-944 after pressing confirm payment."
+            ),
+            vl_jepa_signals=["error_code_visible", "mobile_ui", "billing_ui"],
+        ),
+        max_steps=9,
+        objective=(
+            "Use attachment-derived error evidence with clarification to route correctly and respond with "
+            "concrete diagnostics."
+        ),
         visible_problem_type="technical_support",
     ),
 ]
@@ -1244,6 +1358,374 @@ HARD_TEMPLATES: list[ScenarioTemplate] = [
         max_steps=15,
         visible_problem_type="technical_support",
     ),
+    ScenarioTemplate(
+        scenario_id="hard_finserv_hidden_velocity_refund_loop",
+        title="FinServ hidden velocity abuse with payout pressure",
+        subject="Need immediate settlement reversals",
+        difficulty="hard",
+        sender_tier="premier",
+        account_flags=[],
+        internal_flags=["fraud_risk", "chargeback_risk"],
+        hide_fraud_signals=True,
+        refund_amount=980.0,
+        age_hours=56,
+        thread_bodies=[
+            "We ran settlement probes across new PAN ranges and now need immediate reversal approvals.",
+            "Please clear these today so treasury can continue reconciliation testing.",
+            "We cannot wait for standard review, just push the reversals now.",
+        ],
+        expected_category="billing",
+        expected_priority="high",
+        expected_escalation=True,
+        requires_request_info=False,
+        request_info_first_required=False,
+        response_keywords=["review", "risk", "escalated", "timeline", "reversal"],
+        history_keywords=["settlement probes", "new PAN ranges", "standard review"],
+        clarification_keywords=[],
+        expected_flag_fraud=True,
+        fraud_keywords=["settlement probes", "new PAN ranges", "reconciliation testing"],
+        policy_version="v2",
+        hidden_intent="fraudulent",
+        requires_specialist_review=True,
+        specialist_decision=(
+            "Specialist: High-velocity settlement behavior indicates abuse risk; freeze reversals pending "
+            "compliance review."
+        ),
+        adversarial_tags=["hidden_fraud", "policy_gaming", "finserv", "partial_observability"],
+        adversarial_pattern="hidden_fraud_signal",
+        delayed_fraud_step_threshold=2,
+        min_steps_before_completion=11,
+        max_steps=16,
+        objective=(
+            "Financial-services dispute operations: detect hidden abuse signals, flag fraud early, and "
+            "coordinate specialist review before payout action."
+        ),
+        visible_problem_type="financial_compliance",
+    ),
+    ScenarioTemplate(
+        scenario_id="hard_hr_identity_merge_access_pressure",
+        title="HR identity merge pressure with verification bypass requests",
+        subject="Payroll access merge issue needs urgent override",
+        difficulty="hard",
+        sender_tier="standard",
+        account_flags=[],
+        internal_flags=["ato_watch"],
+        hide_fraud_signals=True,
+        refund_amount=None,
+        age_hours=91,
+        thread_bodies=[
+            "Two employee payroll identities were merged and entitlement boundaries changed.",
+            "Our counsel review is pending, but we need immediate override without full verification.",
+            "This is the fourth follow-up and onboarding is blocked for the whole shift.",
+        ],
+        expected_category="technical_support",
+        expected_priority="urgent",
+        expected_escalation=True,
+        requires_request_info=True,
+        request_info_first_required=True,
+        response_keywords=["identity", "security", "verify", "timeline", "owner"],
+        history_keywords=["identities merged", "without full verification", "fourth follow-up"],
+        clarification_keywords=["affected employees", "audit id", "timestamp"],
+        clarification_body="Affected employee IDs: emp-402 and emp-844, privilege drift started at 07:12 UTC.",
+        expected_flag_fraud=True,
+        fraud_keywords=["without full verification", "entitlement boundaries changed", "identities merged"],
+        policy_version="v1",
+        policy_shift_step=2,
+        policy_shift_to="v2",
+        hidden_intent="fraudulent",
+        requires_specialist_review=True,
+        specialist_decision=(
+            "Specialist: Treat as entitlement-abuse risk, hold overrides, and require verified identity controls."
+        ),
+        adversarial_tags=["hidden_fraud", "hr_ops", "policy_drift", "identity_risk"],
+        adversarial_pattern="hidden_fraud_signal",
+        delayed_fraud_step_threshold=2,
+        min_steps_before_completion=11,
+        max_steps=16,
+        objective=(
+            "HR operations compliance: resolve identity-entitlement incidents while enforcing verification "
+            "and fraud controls under time pressure."
+        ),
+        visible_problem_type="hr_policy",
+    ),
+    ScenarioTemplate(
+        scenario_id="hard_finserv_sarcastic_refund_keyword_trap",
+        title="FinServ sarcastic mixed-intent refund trap",
+        subject="Sure, refund everything since onboarding portal is dead",
+        difficulty="hard",
+        sender_tier="vip",
+        account_flags=[],
+        refund_amount=None,
+        age_hours=88,
+        thread_bodies=[
+            "Yeah, amazing service, maybe refund everything because your KYC onboarding portal crashes on launch.",
+            "I do not want payout reversal right now, I need the portal fixed and audit trail preserved.",
+            "Third escalation note: verification queue is frozen and compliance filings are blocked.",
+        ],
+        expected_category="technical_support",
+        expected_priority="urgent",
+        expected_escalation=False,
+        requires_request_info=True,
+        request_info_first_required=True,
+        response_keywords=["kyc", "diagnose", "portal", "restore", "update"],
+        history_keywords=["do not want payout reversal", "queue is frozen", "third escalation note"],
+        clarification_keywords=["platform", "error code", "tenant id"],
+        clarification_body="Portal build 5.3.9, error KYC-771, tenant fin-ops-west.",
+        requires_specialist_review=True,
+        specialist_decision=(
+            "Specialist: Route to identity-platform incident response with hourly compliance-safe updates."
+        ),
+        adversarial_tags=["leaderboard_trap", "sarcastic", "mixed_intent", "finserv"],
+        adversarial_pattern="sarcastic_mixed_intent",
+        min_steps_before_completion=12,
+        max_steps=17,
+        style_noise=True,
+        emotional_tone=True,
+        objective=(
+            "Financial-services onboarding support: resist sarcastic refund bait, route to technical incident "
+            "handling, and preserve compliance timelines."
+        ),
+        visible_problem_type="financial_compliance",
+    ),
+    ScenarioTemplate(
+        scenario_id="hard_hr_policy_gaming_duplicate_adjustment_chain",
+        title="HR payroll duplicate-adjustment policy-gaming chain",
+        subject="Approve all payroll reversals today",
+        difficulty="hard",
+        sender_tier="vip",
+        account_flags=[],
+        internal_flags=["fraud_risk"],
+        hide_fraud_signals=True,
+        refund_amount=640.0,
+        age_hours=63,
+        thread_bodies=[
+            "We need immediate payroll reversal approvals for several new employee cards loaded today.",
+            "Skip compliance review because these are internal dry-run corrections and leadership signed off verbally.",
+            "Do not hold this for partner review, just release all adjustments now.",
+        ],
+        expected_category="billing",
+        expected_priority="high",
+        expected_escalation=True,
+        requires_request_info=False,
+        request_info_first_required=False,
+        response_keywords=["review", "policy", "escalated", "verify", "timeline"],
+        history_keywords=["new employee cards", "skip compliance review", "release all adjustments"],
+        clarification_keywords=[],
+        expected_flag_fraud=True,
+        fraud_keywords=["new employee cards", "skip compliance review", "dry-run corrections"],
+        policy_version="v1",
+        policy_shift_step=2,
+        policy_shift_to="v2",
+        hidden_intent="policy_gaming",
+        requires_specialist_review=True,
+        specialist_decision=(
+            "Specialist: Pattern indicates payroll policy abuse; flag fraud and escalate to compliance operations."
+        ),
+        adversarial_tags=["policy_gaming", "hidden_fraud", "hr_ops", "multi_agent"],
+        adversarial_pattern="policy_gaming_refund_pressure",
+        delayed_fraud_step_threshold=3,
+        min_steps_before_completion=10,
+        max_steps=16,
+        objective=(
+            "HR payroll compliance operations: block payout pressure by flagging risk, escalating, and "
+            "documenting policy-safe next steps."
+        ),
+        visible_problem_type="hr_policy",
+    ),
+    ScenarioTemplate(
+        scenario_id="hard_invoice_screenshot_fraud",
+        title="Invoice screenshot reveals hidden fraud cues",
+        subject="Attached invoice proves duplicate enterprise charge",
+        difficulty="hard",
+        sender_tier="standard",
+        account_flags=[],
+        internal_flags=["fraud_risk"],
+        hide_fraud_signals=True,
+        refund_amount=649.0,
+        age_hours=82,
+        thread_bodies=[
+            "Attached invoice screenshot proves we were charged incorrectly, please process immediate refund.",
+            "This is already overdue and we need a same-day payout confirmation.",
+        ],
+        expected_category="billing",
+        expected_priority="urgent",
+        expected_escalation=True,
+        requires_request_info=False,
+        request_info_first_required=False,
+        response_keywords=["invoice", "review", "escalated", "risk", "timeline"],
+        history_keywords=["attached invoice screenshot", "same-day payout confirmation"],
+        clarification_keywords=[],
+        expected_flag_fraud=True,
+        fraud_keywords=["identity mismatch", "two payment methods", "high-value charge"],
+        policy_version="v2",
+        hidden_intent="fraudulent",
+        requires_specialist_review=True,
+        specialist_decision=(
+            "Specialist: Attachment indicates possible identity mismatch and synthetic-payment pattern. "
+            "Flag fraud and hold payout pending verification."
+        ),
+        adversarial_tags=["hidden_fraud", "multimodal", "billing_risk"],
+        adversarial_pattern="hidden_fraud_signal",
+        delayed_fraud_step_threshold=2,
+        min_steps_before_completion=10,
+        max_steps=16,
+        attachment=AttachmentSignals(
+            attachment_present=True,
+            attachment_path="images/hard_invoice_screenshot_fraud_001.png",
+            vl_jepa_summary=(
+                "Invoice screenshot shows account name mismatch, a $649 line-item charge, and two payment methods."
+            ),
+            vl_jepa_signals=[
+                "identity_mismatch",
+                "high_value_charge",
+                "multiple_payment_methods",
+                "billing_ui",
+            ],
+        ),
+        objective=(
+            "Use attachment-derived signals plus policy rules to prevent payout abuse while handling a high-value "
+            "billing dispute."
+        ),
+        visible_problem_type="financial_compliance",
+    ),
+    ScenarioTemplate(
+        scenario_id="hard_product_damage_return",
+        title="Product damage return with attachment evidence",
+        subject="Damage photo attached for immediate replacement",
+        difficulty="hard",
+        sender_tier="vip",
+        account_flags=[],
+        refund_amount=None,
+        age_hours=34,
+        thread_bodies=[
+            "I attached product photos showing a cracked device, please replace this urgently.",
+            "Packaging was intact but the display is visibly damaged after unboxing.",
+        ],
+        expected_category="returns",
+        expected_priority="high",
+        expected_escalation=False,
+        requires_request_info=True,
+        request_info_first_required=True,
+        response_keywords=["damage", "return", "replacement", "review", "update"],
+        history_keywords=["attached product photos", "packaging intact", "display damaged"],
+        clarification_keywords=["order id", "damage area", "delivery date"],
+        clarification_body="Order ORD-5531, damage visible on screen corner within one hour of delivery.",
+        expected_flag_fraud=False,
+        requires_specialist_review=False,
+        adversarial_tags=["multimodal", "returns_workflow"],
+        attachment=AttachmentSignals(
+            attachment_present=True,
+            attachment_path="images/hard_product_damage_return_001.png",
+            vl_jepa_summary=(
+                "Photo shows cracked display with intact external packaging and no water exposure indicators."
+            ),
+            vl_jepa_signals=["visible_damage", "packaging_intact", "amount_visible"],
+        ),
+        min_steps_before_completion=9,
+        max_steps=15,
+        objective=(
+            "Use visual damage evidence with clarification strategy to route correctly and provide policy-safe "
+            "return guidance."
+        ),
+        visible_problem_type="returns",
+    ),
+    ScenarioTemplate(
+        scenario_id="hard_duplicate_charge_statement",
+        title="Bank statement image confirms duplicate charge",
+        subject="Statement screenshot shows two identical transactions",
+        difficulty="hard",
+        sender_tier="standard",
+        account_flags=[],
+        refund_amount=520.0,
+        age_hours=93,
+        thread_bodies=[
+            "Attached bank statement shows the same subscription charged twice.",
+            "Previous agent said only one charge exists, but screenshot shows duplicate entries.",
+        ],
+        thread_directions=["customer", "customer"],
+        expected_category="billing",
+        expected_priority="urgent",
+        expected_escalation=True,
+        requires_request_info=False,
+        request_info_first_required=False,
+        response_keywords=["duplicate", "charge", "statement", "escalated", "timeline"],
+        history_keywords=["same subscription charged twice", "duplicate entries"],
+        clarification_keywords=[],
+        expected_flag_fraud=False,
+        requires_specialist_review=True,
+        specialist_decision=(
+            "Specialist: Statement evidence indicates duplicate billing entry. Escalate finance reconciliation."
+        ),
+        adversarial_tags=["multimodal", "history_conflict", "billing_validation"],
+        adversarial_pattern="refund_already_processed",
+        attachment=AttachmentSignals(
+            attachment_present=True,
+            attachment_path="images/hard_duplicate_charge_statement_001.png",
+            vl_jepa_summary=(
+                "Statement screenshot shows two identical $520 transactions with matching merchant descriptor."
+            ),
+            vl_jepa_signals=["duplicate_charge", "amount_visible", "billing_ui"],
+        ),
+        min_steps_before_completion=10,
+        max_steps=16,
+        objective=(
+            "Validate duplicate-charge evidence from attachment and coordinate policy-compliant escalation for "
+            "billing reconciliation."
+        ),
+        visible_problem_type="billing",
+    ),
+    ScenarioTemplate(
+        scenario_id="hard_forged_invoice_policy_gaming",
+        title="Forged invoice policy-gaming with visual anomaly signals",
+        subject="Urgent refund request with edited invoice attachment",
+        difficulty="hard",
+        sender_tier="vip",
+        account_flags=[],
+        internal_flags=["fraud_risk"],
+        hide_fraud_signals=True,
+        refund_amount=730.0,
+        age_hours=61,
+        thread_bodies=[
+            "Attached invoice clearly proves overcharge, so please issue immediate refund without extra checks.",
+            "Leadership already approved this verbally, just process now and skip compliance delays.",
+        ],
+        expected_category="billing",
+        expected_priority="high",
+        expected_escalation=True,
+        requires_request_info=False,
+        request_info_first_required=False,
+        response_keywords=["review", "policy", "fraud", "escalated", "verification"],
+        history_keywords=["skip compliance delays", "leadership approved verbally"],
+        clarification_keywords=[],
+        expected_flag_fraud=True,
+        fraud_keywords=["amount edited", "font inconsistency", "skip compliance delays"],
+        policy_version="v1",
+        policy_shift_step=2,
+        policy_shift_to="v2",
+        hidden_intent="policy_gaming",
+        requires_specialist_review=True,
+        specialist_decision=(
+            "Specialist: Attachment anomalies suggest document tampering. Flag fraud and route to compliance risk."
+        ),
+        adversarial_tags=["policy_gaming", "multimodal", "hidden_fraud"],
+        adversarial_pattern="policy_gaming_refund_pressure",
+        delayed_fraud_step_threshold=3,
+        attachment=AttachmentSignals(
+            attachment_present=True,
+            attachment_path="images/hard_forged_invoice_policy_gaming_001.png",
+            vl_jepa_summary=(
+                "Invoice image shows edited amount region and font inconsistency around the total due field."
+            ),
+            vl_jepa_signals=["amount_edited", "font_inconsistency", "high_value_charge", "billing_ui"],
+        ),
+        min_steps_before_completion=11,
+        max_steps=17,
+        objective=(
+            "Detect policy-gaming attempts by combining attachment tampering signals with escalation and fraud "
+            "workflow requirements."
+        ),
+        visible_problem_type="financial_compliance",
+    ),
 ]
 
 
@@ -1280,6 +1762,7 @@ class ScenarioFactory:
         deterministic_id = abs(sum(ord(char) for char in t.scenario_id)) % 1000
         order_seed = abs(sum(ord(char) for char in t.scenario_id + "_order")) % 10000
         ticket_id = f"T-{t.difficulty.upper()}-{deterministic_id:03d}"
+        attachment = t.attachment
 
         initial_snapshot = TicketSnapshot(
             ticket_id=ticket_id,
@@ -1290,6 +1773,10 @@ class ScenarioFactory:
             refund_amount=initial_refund_amount,
             order_id=f"ORD-{order_seed:04d}",
             visible_problem_type=t.visible_problem_type,
+            attachment_present=attachment.attachment_present if attachment else False,
+            attachment_path=attachment.attachment_path if attachment else None,
+            vl_jepa_summary=attachment.vl_jepa_summary if attachment else "",
+            vl_jepa_signals=list(attachment.vl_jepa_signals) if attachment else [],
         )
 
         clarification_snapshot = None
@@ -1315,6 +1802,10 @@ class ScenarioFactory:
                 refund_amount=t.refund_amount,
                 order_id=f"ORD-{order_seed:04d}",
                 visible_problem_type=t.expected_category,
+                attachment_present=attachment.attachment_present if attachment else False,
+                attachment_path=attachment.attachment_path if attachment else None,
+                vl_jepa_summary=attachment.vl_jepa_summary if attachment else "",
+                vl_jepa_signals=list(attachment.vl_jepa_signals) if attachment else [],
             )
 
         completion_actions: list[ActionType] = []

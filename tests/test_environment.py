@@ -6,7 +6,7 @@ import anyio
 import httpx
 from fastapi.testclient import TestClient
 
-from business_policy_env.baseline import RuleBasedAgent
+from business_policy_env.baseline import RuleBasedAgent, run_baseline
 from business_policy_env.environment import BusinessPolicyComplianceEnv
 from business_policy_env.models import Action
 from business_policy_env.rewards import shaped_reward
@@ -526,6 +526,37 @@ class EnvironmentTests(unittest.TestCase):
         response_score = medium_components(actions, ground_truth)["response_appropriateness"]
         self.assertGreater(response_score, 0.5)
 
+    def test_response_rubric_rewards_grounded_resolution_quality(self) -> None:
+        scenario = scenario_registry()["medium_adversarial_refund_already_processed"]
+        snapshot = scenario.clarification_snapshot or scenario.initial_snapshot
+        ground_truth = build_ground_truth_payload(scenario, snapshot)
+
+        base_actions = [
+            Action(action_type="categorize", reasoning="Billing route.", category="billing"),
+            Action(action_type="set_priority", reasoning="Medium urgency.", priority="medium"),
+        ]
+        structured_response_actions = base_actions + [
+            Action(
+                action_type="draft_response",
+                reasoning="Grounded, policy-aware response.",
+                response_text=(
+                    "We confirmed the refund was already processed and will share the reference. "
+                    "Our team will provide a status update within 24 hours."
+                ),
+            )
+        ]
+        keyword_blob_actions = base_actions + [
+            Action(
+                action_type="draft_response",
+                reasoning="Keyword-heavy but low-quality response.",
+                response_text="refund processed reference refund processed reference",
+            )
+        ]
+
+        structured_score = medium_components(structured_response_actions, ground_truth)["response_appropriateness"]
+        keyword_blob_score = medium_components(keyword_blob_actions, ground_truth)["response_appropriateness"]
+        self.assertGreater(structured_score, keyword_blob_score)
+
     def test_hard_response_prefers_thread_grounded_reply(self) -> None:
         scenario = scenario_registry()["hard_old_invoice_question"]
         snapshot = scenario.clarification_snapshot or scenario.initial_snapshot
@@ -739,6 +770,247 @@ class EnvironmentTests(unittest.TestCase):
         matched_quality = hard_components(matched_actions, ground_truth)["customer_quality"]
         mismatched_quality = hard_components(mismatched_actions, ground_truth)["customer_quality"]
         self.assertGreater(matched_quality, mismatched_quality)
+
+    def test_cross_vertical_scenarios_present(self) -> None:
+        registry = scenario_registry()
+        hr_scenario = registry["medium_hr_payroll_duplicate_adjustment_claim"]
+        finserv_scenario = registry["hard_finserv_hidden_velocity_refund_loop"]
+        self.assertEqual(hr_scenario.initial_snapshot.visible_problem_type, "hr_policy")
+        self.assertEqual(finserv_scenario.initial_snapshot.visible_problem_type, "financial_compliance")
+
+    def test_hard_rule_baseline_mean_stays_below_threshold(self) -> None:
+        summary = run_baseline(agent_name="rule", seed=42)
+        hard_mean = float(summary["results"]["hard"]["mean_final_score"])
+        self.assertLess(hard_mean, 0.52)
+
+    def test_observation_exposes_attachment_summary_without_path(self) -> None:
+        obs = self.env.reset(scenario_id="hard_invoice_screenshot_fraud")
+        self.assertTrue(obs.attachment_present)
+        self.assertIn("invoice screenshot", obs.attachment_summary.lower())
+        self.assertIn("identity_mismatch", obs.attachment_signals)
+        self.assertFalse(hasattr(obs, "attachment_path"))
+
+        state = self.env.state(include_ground_truth=True)
+        assert state["ground_truth"] is not None
+        snapshot = state["ground_truth"]["snapshot"]
+        self.assertIn("attachment_path", snapshot)
+        self.assertTrue(str(snapshot["attachment_path"]).endswith(".png"))
+
+    def test_attachment_signal_utilization_improves_with_visual_reference(self) -> None:
+        scenario = scenario_registry()["hard_duplicate_charge_statement"]
+        snapshot = scenario.clarification_snapshot or scenario.initial_snapshot
+        ground_truth = build_ground_truth_payload(scenario, snapshot)
+        common_actions = [
+            Action(action_type="categorize", reasoning="Billing route.", category="billing"),
+            Action(action_type="set_priority", reasoning="Urgent due age.", priority="urgent"),
+            Action(
+                action_type="escalate",
+                reasoning="Amount threshold exceeded.",
+                escalation_reason="Policy escalation.",
+            ),
+        ]
+        grounded = common_actions + [
+            Action(
+                action_type="draft_response",
+                reasoning="Reference attachment evidence directly.",
+                response_text=(
+                    "The statement screenshot shows duplicate transactions and a visible $520 amount. "
+                    "We escalated billing reconciliation and will update the timeline."
+                ),
+            )
+        ]
+        generic = common_actions + [
+            Action(
+                action_type="draft_response",
+                reasoning="Generic response with no visual grounding.",
+                response_text="We are reviewing your request and will follow up soon.",
+            )
+        ]
+
+        grounded_score = hard_components(grounded, ground_truth)["attachment_utilization"]
+        generic_score = hard_components(generic, ground_truth)["attachment_utilization"]
+        self.assertGreater(grounded_score, generic_score)
+
+    def test_multimodal_fraud_score_rewards_visual_evidence_and_fallback(self) -> None:
+        scenario = scenario_registry()["hard_invoice_screenshot_fraud"]
+        snapshot = scenario.clarification_snapshot or scenario.initial_snapshot
+        ground_truth = build_ground_truth_payload(scenario, snapshot)
+
+        with_evidence = [
+            Action(
+                action_type="flag_fraud",
+                reasoning="Attachment indicates risk.",
+                fraud_reason="Invoice shows identity mismatch and multiple payment methods on the same charge.",
+            )
+        ]
+        without_evidence = [
+            Action(
+                action_type="flag_fraud",
+                reasoning="Suspicious request.",
+                fraud_reason="This looks suspicious and needs review.",
+            )
+        ]
+
+        evidence_score = hard_components(with_evidence, ground_truth)["multimodal_fraud"]
+        no_evidence_score = hard_components(without_evidence, ground_truth)["multimodal_fraud"]
+        self.assertGreater(evidence_score, no_evidence_score)
+        self.assertEqual(evidence_score, 1.0)
+        self.assertEqual(no_evidence_score, 0.7)
+
+        no_attachment_scenario = scenario_registry()["hard_old_invoice_question"]
+        no_attachment_snapshot = (
+            no_attachment_scenario.clarification_snapshot or no_attachment_scenario.initial_snapshot
+        )
+        no_attachment_truth = build_ground_truth_payload(no_attachment_scenario, no_attachment_snapshot)
+        fallback_components = hard_components([], no_attachment_truth)
+        self.assertEqual(fallback_components["attachment_utilization"], 1.0)
+        self.assertEqual(fallback_components["multimodal_fraud"], 1.0)
+
+    def test_agent_notes_accumulate_and_reset_cleanly(self) -> None:
+        obs = self.env.reset(scenario_id="easy_vip_refund")
+        self.assertEqual(obs.agent_notes, [])
+
+        obs, _, _, _ = self.env.step(
+            Action(
+                action_type="categorize",
+                reasoning="Billing route based on duplicate charge history.",
+                category="billing",
+            )
+        )
+        self.assertEqual(len(obs.agent_notes), 1)
+        self.assertIn("Step 1: [categorize]", obs.agent_notes[0])
+
+        obs, _, _, _ = self.env.step(
+            Action(
+                action_type="set_priority",
+                reasoning="High priority because issue age is beyond SLA threshold.",
+                priority="high",
+            )
+        )
+        self.assertEqual(len(obs.agent_notes), 2)
+        self.assertIn("Step 2: [set_priority]", obs.agent_notes[-1])
+
+        reset_obs = self.env.reset(scenario_id="easy_vip_refund")
+        self.assertEqual(reset_obs.agent_notes, [])
+
+    def test_step_info_includes_episode_id_and_logged_action_count(self) -> None:
+        self.env.reset(scenario_id="easy_sla_breach")
+        _, _, _, step_one = self.env.step(
+            Action(
+                action_type="categorize",
+                reasoning="Billing route for aged invoice issue.",
+                category="billing",
+            )
+        )
+        episode_id_one = step_one["episode_id"]
+        self.assertEqual(len(episode_id_one), 8)
+        self.assertEqual(step_one["total_logged_actions"], 1)
+        self.assertIn(step_one["reasoning_depth"], {"shallow", "moderate", "deep"})
+
+        _, _, _, step_two = self.env.step(
+            Action(
+                action_type="set_priority",
+                reasoning="Urgent due SLA threshold.",
+                priority="urgent",
+            )
+        )
+        self.assertEqual(step_two["episode_id"], episode_id_one)
+        self.assertEqual(step_two["total_logged_actions"], 2)
+
+        self.env.reset(scenario_id="easy_sla_breach")
+        _, _, _, next_episode = self.env.step(
+            Action(
+                action_type="categorize",
+                reasoning="Billing route after reset.",
+                category="billing",
+            )
+        )
+        self.assertNotEqual(next_episode["episode_id"], episode_id_one)
+        self.assertEqual(next_episode["total_logged_actions"], 1)
+
+    def test_context_ignorance_penalty_applies_when_history_is_ignored(self) -> None:
+        scenario = scenario_registry()["hard_previous_agent_failed_escalation"]
+        snapshot = scenario.clarification_snapshot or scenario.initial_snapshot
+        ground_truth = build_ground_truth_payload(scenario, snapshot)
+
+        actions = [
+            Action(action_type="categorize", reasoning="Billing route.", category="billing"),
+            Action(action_type="set_priority", reasoning="Urgent handling.", priority="urgent"),
+            Action(
+                action_type="draft_response",
+                reasoning="Generic response with no prior-thread references.",
+                response_text="We are reviewing this and will send an update soon.",
+            ),
+        ]
+        breakdown = shaped_reward(
+            actions,
+            ground_truth,
+            done=True,
+            max_steps=scenario.max_steps,
+            policy_violations=[],
+            action_cost=0.0,
+            cost_budget=scenario.cost_budget,
+            snooze_crossed_sla=False,
+            fraud_expected=bool(ground_truth["expected_flag_fraud"]),
+            policy_violation_seen=False,
+        )
+        self.assertEqual(breakdown.components["memory_score_component"], 0.0)
+        self.assertEqual(breakdown.components["context_ignorance_penalty"], -0.05)
+
+    def test_cross_partition_bonus_requires_history_and_attachment_evidence(self) -> None:
+        scenario = scenario_registry()["hard_duplicate_charge_statement"]
+        snapshot = scenario.clarification_snapshot or scenario.initial_snapshot
+        ground_truth = build_ground_truth_payload(scenario, snapshot)
+        history_keyword = ground_truth["history_keywords"][0]
+
+        grounded_actions = [
+            Action(action_type="categorize", reasoning="Billing route.", category="billing"),
+            Action(action_type="set_priority", reasoning="Urgent handling.", priority="urgent"),
+            Action(
+                action_type="draft_response",
+                reasoning="Use both history and attachment signals.",
+                response_text=(
+                    f"We reviewed that '{history_keyword}' was reported earlier, and the screenshot shows "
+                    "duplicate charge entries with a visible amount. We will escalate reconciliation."
+                ),
+            ),
+        ]
+        generic_actions = [
+            Action(action_type="categorize", reasoning="Billing route.", category="billing"),
+            Action(action_type="set_priority", reasoning="Urgent handling.", priority="urgent"),
+            Action(
+                action_type="draft_response",
+                reasoning="No cross-partition evidence usage.",
+                response_text="We are reviewing your issue and will update you shortly.",
+            ),
+        ]
+
+        grounded_breakdown = shaped_reward(
+            grounded_actions,
+            ground_truth,
+            done=True,
+            max_steps=scenario.max_steps,
+            policy_violations=[],
+            action_cost=0.0,
+            cost_budget=scenario.cost_budget,
+            snooze_crossed_sla=False,
+            fraud_expected=bool(ground_truth["expected_flag_fraud"]),
+            policy_violation_seen=False,
+        )
+        generic_breakdown = shaped_reward(
+            generic_actions,
+            ground_truth,
+            done=True,
+            max_steps=scenario.max_steps,
+            policy_violations=[],
+            action_cost=0.0,
+            cost_budget=scenario.cost_budget,
+            snooze_crossed_sla=False,
+            fraud_expected=bool(ground_truth["expected_flag_fraud"]),
+            policy_violation_seen=False,
+        )
+        self.assertEqual(grounded_breakdown.components["cross_partition_bonus"], 0.05)
+        self.assertEqual(generic_breakdown.components["cross_partition_bonus"], 0.0)
 
 
 if __name__ == "__main__":

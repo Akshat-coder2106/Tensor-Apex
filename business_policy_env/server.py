@@ -76,5 +76,7 @@ def state(
 @app.delete("/session")
 def close_session(x_session_id: str | None = Header(default=None)) -> dict[str, str]:
     session_id = _session_or_default(x_session_id)
-    _sessions.pop(session_id, None)
+    env = _sessions.pop(session_id, None)
+    if env is not None:
+        env.close()
     return {"closed": session_id}

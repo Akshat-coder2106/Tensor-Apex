@@ -33,7 +33,7 @@ actions:
   - snooze
   - consult_specialist
 baseline:
-  command: python baseline.py --agent rule
+  command: python baseline.py --agent rule --seed 42
 tasks:
   - name: easy
     objective: Single-turn tickets with clear policy constraints.
@@ -41,3 +41,16 @@ tasks:
     objective: Ambiguous tickets that require request_info before resolution.
   - name: hard
     objective: Multi-turn threads with temporal pressure, policy rules, and history-aware responses.
+observation:
+  attachment_present: bool
+  attachment_summary: string
+  attachment_signals:
+    - string
+  agent_notes:
+    - string
+multimodal:
+  preprocessing: vl_jepa
+  runtime_inference: false
+  signals_precomputed: true
+  image_format: png
+  max_signals_per_attachment: 6

@@ -56,6 +56,10 @@ class TicketSnapshot(BaseModel):
     order_id: str | None = None
     product_name: str | None = None
     visible_problem_type: str | None = None
+    attachment_present: bool = False
+    attachment_path: str | None = None
+    vl_jepa_summary: str = ""
+    vl_jepa_signals: list[str] = Field(default_factory=list)
 
 
 class GroundTruth(BaseModel):
@@ -178,6 +182,10 @@ class Observation(BaseModel):
     policy_shift_at_step: int | None = None
     policy_shift_to: PolicyVersion | None = None
     specialist_feedback: str | None = None
+    attachment_present: bool = False
+    attachment_summary: str = ""
+    attachment_signals: list[str] = Field(default_factory=list)
+    agent_notes: list[str] = Field(default_factory=list)
     task_objective: str
     clarification_received: bool = False
     episode_phase: EpisodePhase = EpisodePhase.initial

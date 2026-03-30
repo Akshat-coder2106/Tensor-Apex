@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .models import Action, RewardBreakdown
-from .tasks import GroundTruthPayload, component_scores, grade_actions
+from .tasks import GroundTruthPayload, component_scores, context_usage_score, grade_actions
 
 VALID_ACTION_REWARD = 0.05
 REDUNDANT_ACTION_REWARD = 0.01
@@ -18,6 +18,8 @@ COST_EFFICIENCY_BONUS = 0.08
 COST_OVER_BUDGET_PENALTY = -0.12
 DELAYED_FRAUD_PENALTY = -0.12
 EARLY_MISROUTE_PENALTY = -0.08
+CONTEXT_IGNORANCE_PENALTY = -0.05
+CROSS_PARTITION_BONUS = 0.05
 
 
 def _clamp_reward(value: float) -> float:
@@ -98,6 +100,30 @@ def _early_misroute_penalty(actions: list[Action], ground_truth: GroundTruthPayl
     return EARLY_MISROUTE_PENALTY if first_categorize.category != expected_category else 0.0
 
 
+def _signal_terms(signal: str) -> set[str]:
+    fallback = signal.replace("_", " ")
+    first = signal.split("_")[0]
+    return {fallback, first}
+
+
+def _cross_partition_bonus(actions: list[Action], ground_truth: GroundTruthPayload) -> float:
+    history_keywords = list(ground_truth.get("history_keywords", []) or [])
+    attachment_signals = list(ground_truth.get("attachment_signals", []) or [])
+    if not history_keywords or not attachment_signals:
+        return 0.0
+
+    draft = next((action for action in reversed(actions) if action.action_type == "draft_response"), None)
+    if draft is None or not draft.response_text:
+        return 0.0
+
+    lowered = draft.response_text.lower()
+    history_hit = any(keyword.lower() in lowered for keyword in history_keywords)
+    attachment_hit = any(any(term in lowered for term in _signal_terms(signal)) for signal in attachment_signals)
+    if history_hit and attachment_hit:
+        return CROSS_PARTITION_BONUS
+    return 0.0
+
+
 def shaped_reward(
     actions: list[Action],
     ground_truth: GroundTruthPayload,
@@ -132,6 +158,13 @@ def shaped_reward(
         fraud_penalty = _fraud_missed_penalty(actions, fraud_expected)
         delayed_fraud_penalty = _delayed_fraud_penalty(actions, ground_truth)
         misroute_penalty = _early_misroute_penalty(actions, ground_truth)
+        memory_score = context_usage_score(actions, ground_truth)
+        context_ignorance_penalty = (
+            CONTEXT_IGNORANCE_PENALTY
+            if ground_truth.get("history_keywords") and memory_score < 0.3
+            else 0.0
+        )
+        cross_partition_bonus = _cross_partition_bonus(actions, ground_truth)
         cost_adjustment = _cost_adjustment(action_cost, cost_budget)
         final_reward = _clamp_reward(
             partial_score
@@ -144,6 +177,8 @@ def shaped_reward(
             + fraud_penalty
             + delayed_fraud_penalty
             + misroute_penalty
+            + context_ignorance_penalty
+            + cross_partition_bonus
             + cost_adjustment
         )
         components.update(
@@ -154,6 +189,9 @@ def shaped_reward(
                 "fraud_missed_penalty": fraud_penalty,
                 "delayed_fraud_penalty": delayed_fraud_penalty,
                 "early_misroute_penalty": misroute_penalty,
+                "memory_score_component": round(memory_score, 4),
+                "context_ignorance_penalty": context_ignorance_penalty,
+                "cross_partition_bonus": cross_partition_bonus,
                 "cost_adjustment": cost_adjustment,
             }
         )

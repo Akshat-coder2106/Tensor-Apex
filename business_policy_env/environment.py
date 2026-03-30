@@ -7,6 +7,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from .db import ActionLogger
 from .models import (
     Action,
     ActionRecord,
@@ -22,6 +23,7 @@ from .rewards import current_progress, invalid_action_breakdown, shaped_reward
 from .tasks import (
     build_ground_truth_payload,
     compute_issue_age_hours,
+    context_usage_score,
     evaluation_metrics,
     failure_modes,
     scenario_registry,
@@ -45,6 +47,8 @@ class BusinessPolicyComplianceEnv:
         self._performance_history: list[float] = []
         self._episode_recorded = False
         self._policy_violation_seen = False
+        self._agent_notes: list[str] = []
+        self._logger = ActionLogger()
         self._variation_counter = 0
         self._variation_seed = (
             int(variation_seed) if variation_seed is not None else random.SystemRandom().randrange(1, 1_000_000_000)
@@ -208,16 +212,30 @@ class BusinessPolicyComplianceEnv:
         return scenario.now + timedelta(seconds=step_index)
 
     def _episode_log(self) -> list[dict[str, Any]]:
-        return [
-            {
-                "step_index": record.step_index,
-                "action_type": record.action.action_type,
-                "payload": record.action.model_dump(mode="json"),
-                "timestamp": record.timestamp.isoformat(),
-                "valid": int(record.valid),
-            }
-            for record in self.action_history
+        return self._logger.get_episode_actions()
+
+    def _reasoning_depth(self) -> str:
+        if len(self._agent_notes) < 2:
+            return "shallow"
+
+        all_notes = " ".join(self._agent_notes).lower()
+        cross_reference_terms = [
+            "previous",
+            "earlier",
+            "thread",
+            "history",
+            "already",
+            "attachment",
+            "mentioned",
+            "follow-up",
         ]
+        cross_refs = sum(1 for term in cross_reference_terms if term in all_notes)
+        unique_types = len({record.action.action_type for record in self.action_history})
+        if cross_refs >= 3 and unique_types >= 3:
+            return "deep"
+        if cross_refs >= 1 or unique_types >= 2:
+            return "moderate"
+        return "shallow"
 
     def _observation(self) -> Observation:
         scenario = self._active_snapshot()
@@ -259,6 +277,10 @@ class BusinessPolicyComplianceEnv:
             policy_shift_at_step=scenario.policy_shift_step if policy_shift_pending else None,
             policy_shift_to=scenario.policy_shift_to if policy_shift_pending else None,
             specialist_feedback=self._specialist_feedback,
+            attachment_present=snapshot.attachment_present,
+            attachment_summary=snapshot.vl_jepa_summary,
+            attachment_signals=snapshot.vl_jepa_signals,
+            agent_notes=list(self._agent_notes),
             task_objective=scenario.objective,
             clarification_received=self.clarification_received,
             episode_phase=self.episode_phase,
@@ -313,6 +335,8 @@ class BusinessPolicyComplianceEnv:
     def reset(self, task_name: str | None = None, scenario_id: str | None = None) -> Observation:
         self.current_scenario = self._select_scenario(task_name, scenario_id)
         self.action_history = []
+        self._agent_notes = []
+        self._logger.new_episode()
         self.clarification_received = False
         self.episode_phase = EpisodePhase.initial
         self._simulated_offset_hours = 0.0
@@ -341,6 +365,9 @@ class BusinessPolicyComplianceEnv:
                 "evaluation_metrics": {},
                 "failure_modes": [],
                 "explanation": "Episode is already complete. Call reset() to start a new ticket.",
+                "episode_id": self._logger.episode_id,
+                "total_logged_actions": self._logger.total_logged(),
+                "reasoning_depth": self._reasoning_depth(),
             }
             return observation, 0.0, True, info_done
 
@@ -359,6 +386,9 @@ class BusinessPolicyComplianceEnv:
                 "evaluation_metrics": {},
                 "failure_modes": ["invalid_action"],
                 "explanation": breakdown.explanation,
+                "episode_id": self._logger.episode_id,
+                "total_logged_actions": self._logger.total_logged(),
+                "reasoning_depth": self._reasoning_depth(),
             }
             return observation, breakdown.reward, False, info_invalid
 
@@ -389,6 +419,16 @@ class BusinessPolicyComplianceEnv:
             valid=True,
         )
         self.action_history.append(record)
+        self._agent_notes.append(
+            f"Step {record.step_index}: [{action.action_type}] {action.reasoning[:120]}"
+        )
+        self._logger.log_action(
+            step_index=record.step_index,
+            action_type=record.action.action_type,
+            payload=record.action.model_dump(mode="json"),
+            timestamp=record.timestamp.isoformat(),
+            valid=record.valid,
+        )
 
         if (
             action.action_type == "request_info"
@@ -433,6 +473,7 @@ class BusinessPolicyComplianceEnv:
             cost_budget=scenario.cost_budget,
             policy_violation_seen=self._policy_violation_seen,
         )
+        used_history_score = context_usage_score(actions, grading_payload)
         failures = failure_modes(metrics, policy_violations=policy_violations, done=self.done)
         if self.done and not self._episode_recorded:
             self._performance_history.append(progress_score)
@@ -451,6 +492,10 @@ class BusinessPolicyComplianceEnv:
             "explanation": reward_breakdown.explanation,
             "policy_event": policy_event,
             "active_policy_version": self._active_policy_version,
+            "episode_id": self._logger.episode_id,
+            "total_logged_actions": self._logger.total_logged(),
+            "reasoning_depth": self._reasoning_depth(),
+            "used_history": used_history_score >= 0.3,
         }
         return observation, reward_breakdown.reward, self.done, info_step
 
@@ -539,3 +584,6 @@ class BusinessPolicyComplianceEnv:
         if latest_category == "legal":
             return "Specialist: Loop in compliance/legal review before sending commitments to the customer."
         return "Specialist: Preserve policy compliance, provide timeline clarity, and reduce operational risk."
+
+    def close(self) -> None:
+        self._logger.close()

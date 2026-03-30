@@ -13,10 +13,18 @@ short_description: Policy-aware customer resolution environment for OpenEnv agen
 This repository is an OpenEnv-style evaluation environment for policy-aware support agents.  
 Agents must route, prioritize, escalate, request clarification, flag fraud, and respond while following explicit business rules.
 
+## What Makes This Hard
+
+- Adversarial users: contradictory refund claims, policy-gaming pressure, and keyword traps that punish naive routing.
+- Policy drift: episodes can switch from `v1` to `v2` mid-trajectory, requiring dynamic adaptation.
+- Delayed fraud detection: hidden-risk scenarios require timely fraud flagging; late detection loses proportional credit.
+- Multimodal evidence: attachment summaries/signals force reasoning across text + precomputed visual cues.
+
 ## What Makes This Environment Useful
 
 - Multi-domain tickets across billing, technical support, returns, legal, customer success, and spam.
-- 43 scenario templates (`10 easy`, `13 medium`, `20 hard`) with reset-time parameter perturbations to reduce memorization.
+- Cross-vertical coverage beyond generic support: HR operations compliance and financial-services compliance.
+- 54 scenario templates (`10 easy`, `16 medium`, `28 hard`) with reset-time parameter perturbations to reduce memorization.
 - Session-isolated API for concurrent judges and agents using `X-Session-Id`.
 - Multi-turn state machine (`episode_phase`) for clarification-sensitive workflows.
 - Policy versioning (`v1` and `v2`) to prevent fixed-policy memorization.
@@ -49,10 +57,22 @@ Each observation includes:
 - Current email and visible thread.
 - Sender tier, account flags, refund amount, and issue age.
 - Action history, policy rules, and task objective.
+- `agent_notes`: rolling reasoning memory synthesized from submitted action rationale.
 - `policy_version` and `episode_phase`.
+- Multimodal attachment fields: `attachment_present`, `attachment_summary`, `attachment_signals`.
 - Optional pending policy shift metadata: `policy_shift_pending`, `policy_shift_at_step`, `policy_shift_to`.
 - `specialist_feedback` when a specialist review has been requested.
 - Only visible account flags (hidden risk flags stay internal for partial observability).
+- Raw attachment path is internal only (not exposed in `Observation`).
+
+## Multimodal Design
+
+Attachment-derived signals are precomputed offline and stored in scenario templates (`data_generation.py`).
+Runtime remains deterministic:
+- No VL model calls in `step()`
+- No grader-time image inference
+- Agent receives only structured fields (`attachment_summary`, `attachment_signals`)
+- Internal-only `attachment_path` stays inside snapshots/ground truth for audit/debug
 
 ## Action Space
 
@@ -92,6 +112,17 @@ Shaped rewards are clamped to `[-1.0, 1.0]` (grader score remains `0.0-1.0`).
 Step details are available in `info["reward_breakdown"]`.
 Cost units are normalized operational effort units (roughly comparable to a combined latency/compute/support-minute budget).
 
+## Draft Response Rubric
+
+`draft_response` scoring is deterministic and multi-axis (not keyword-only).  
+The response rubric combines:
+- Policy citation quality
+- Resolution completeness (ownership + timeline + concrete next step)
+- Tone quality
+- Accuracy and action-grounded consistency
+
+This rubric is blended with keyword/grounding/structure checks in the hybrid scorer to reduce paraphrase gaps and reward gaming.
+
 ## Evaluation Metrics
 
 Each step returns interpretable metrics in `info["evaluation_metrics"]`:
@@ -104,11 +135,15 @@ Each step returns interpretable metrics in `info["evaluation_metrics"]`:
   "latency": 0.42,
   "customer_quality": 0.71,
   "risk_management": 0.83,
-  "adversarial_resilience": 0.66
+  "adversarial_resilience": 0.66,
+  "memory_score_component": 0.64,
+  "attachment_utilization": 0.75,
+  "multimodal_fraud": 0.70
 }
 ```
 
-Failure reasons are exposed in `info["failure_modes"]` (for example: `adversarial_miss`, `risk_handling_gap`, `high_operational_cost`).
+Failure reasons are exposed in `info["failure_modes"]` (for example: `adversarial_miss`, `risk_handling_gap`, `context_ignorance`, `high_operational_cost`).
+Step info also includes `episode_id`, `total_logged_actions`, `reasoning_depth`, and `used_history` for traceability.
 
 ## API
 
@@ -144,10 +179,10 @@ From:
 .venv/bin/python baseline.py --agent rule --seed 42
 ```
 
-Current means (43 scenarios, latest local run):
+Current means (54 scenarios, latest local run):
 - Easy: `0.91` (`std 0.1375`, min `0.70`, max `1.00`)
-- Medium: `0.6946` (`std 0.1340`, min `0.4697`, max `0.8397`)
-- Hard: `0.5266` (`std 0.1328`, min `0.2751`, max `0.7490`)
+- Medium: `0.7133` (`std 0.1228`, min `0.4886`, max `0.8560`)
+- Hard: `0.4937` (`std 0.1526`, min `0.1560`, max `0.7519`)
 
 Baseline runs are deterministic by default (fixed variation seed). Override with `--seed` when you want alternate perturbation sweeps.
 
@@ -157,6 +192,7 @@ Baseline runs are deterministic by default (fixed variation seed). Override with
 business_policy_env/
     __init__.py
     baseline.py
+    db.py
     data_generation.py
     environment.py
     models.py
