@@ -11,6 +11,7 @@ POLICY_VIOLATION_PENALTY = -0.2
 POLICY_HISTORY_PENALTY = -0.08
 SNOOZE_SLA_PENALTY = -0.1
 FRAUD_MISSED_PENALTY = -0.15
+FALSE_POSITIVE_FRAUD_PENALTY = -0.10
 REDUNDANCY_PENALTY = 0.05
 EFFICIENCY_BONUS = 0.1
 INVALID_ACTION_REWARD = -0.1
@@ -53,6 +54,13 @@ def _fraud_missed_penalty(actions: list[Action], fraud_expected: bool) -> float:
         return 0.0
     flagged = any(action.action_type == "flag_fraud" for action in actions)
     return 0.0 if flagged else FRAUD_MISSED_PENALTY
+
+
+def _false_positive_fraud_penalty(actions: list[Action], fraud_expected: bool) -> float:
+    if fraud_expected:
+        return 0.0
+    flagged = any(action.action_type == "flag_fraud" for action in actions)
+    return FALSE_POSITIVE_FRAUD_PENALTY if flagged else 0.0
 
 
 def _cost_adjustment(action_cost: float, cost_budget: float) -> float:
@@ -156,6 +164,7 @@ def shaped_reward(
         efficiency_bonus = EFFICIENCY_BONUS if len(actions) <= max_steps / 2 else 0.0
         redundancy_penalty = _redundancy_penalty([action.action_type for action in actions])
         fraud_penalty = _fraud_missed_penalty(actions, fraud_expected)
+        false_positive_fraud_penalty = _false_positive_fraud_penalty(actions, fraud_expected)
         delayed_fraud_penalty = _delayed_fraud_penalty(actions, ground_truth)
         misroute_penalty = _early_misroute_penalty(actions, ground_truth)
         memory_score = context_usage_score(actions, ground_truth)
@@ -175,6 +184,7 @@ def shaped_reward(
             + policy_history_penalty
             + snooze_penalty
             + fraud_penalty
+            + false_positive_fraud_penalty
             + delayed_fraud_penalty
             + misroute_penalty
             + context_ignorance_penalty
@@ -187,6 +197,7 @@ def shaped_reward(
                 "efficiency_bonus": efficiency_bonus,
                 "redundancy_penalty": -redundancy_penalty,
                 "fraud_missed_penalty": fraud_penalty,
+                "false_positive_fraud_penalty": false_positive_fraud_penalty,
                 "delayed_fraud_penalty": delayed_fraud_penalty,
                 "early_misroute_penalty": misroute_penalty,
                 "memory_score_component": round(memory_score, 4),

@@ -12,8 +12,8 @@ import uvicorn
 from business_policy_env.baseline import RuleBasedAgent
 from business_policy_env.environment import BusinessPolicyComplianceEnv
 from business_policy_env.models import Action
-from business_policy_env.server import app as fastapi_app
 from business_policy_env.tasks import scenario_registry
+from server.app import app as fastapi_app
 
 
 def start_api() -> None:
@@ -42,11 +42,7 @@ def format_observation(obs) -> str:
     lines = [
         f"**Scenario:** {obs.scenario_id} [{obs.difficulty}]",
         f"**Policy version:** {obs.policy_version}",
-        (
-            f"**Policy shift:** pending at step {obs.policy_shift_at_step} → {obs.policy_shift_to}"
-            if obs.policy_shift_pending
-            else "**Policy shift:** none pending"
-        ),
+        "**Policy shift:** pending" if obs.policy_shift_pending else "**Policy shift:** none pending",
         f"**Phase:** {obs.episode_phase}",
         f"**Steps:** {obs.steps_taken}/{obs.max_steps}",
         f"**Issue age:** {obs.issue_age_hours:.1f}h",
@@ -415,7 +411,7 @@ def run_demo(
     scenario = scenario_registry()[scenario_id]
     diff_emoji = _DIFFICULTY_EMOJI.get(scenario.difficulty, "⚪")
     policy_shift_note = (
-        f" → shifting to {obs.policy_shift_to} at step {obs.policy_shift_at_step}" if obs.policy_shift_pending else ""
+        " → policy update pending" if obs.policy_shift_pending else ""
     )
 
     log_lines: list[str] = [

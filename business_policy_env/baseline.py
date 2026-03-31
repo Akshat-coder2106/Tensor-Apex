@@ -7,6 +7,8 @@ import re
 from statistics import mean, pstdev
 from typing import Any, Protocol
 
+from openai.types.chat import ChatCompletionMessageParam
+
 from .environment import BusinessPolicyComplianceEnv
 from .models import Action, Category, Observation, Priority
 from .tasks import scenarios_for_task
@@ -186,10 +188,10 @@ class OpenAIBaselineAgent:
 
         base_url = os.getenv("OPENAI_BASE_URL") or os.getenv("API_BASE_URL")
 
-        client_kwargs: dict[str, str] = {"api_key": api_key}
         if base_url:
-            client_kwargs["base_url"] = base_url
-        self._client = OpenAI(**client_kwargs)
+            self._client = OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            self._client = OpenAI(api_key=api_key)
         self._model = model
 
     def next_action(self, observation: Observation) -> Action:  # pragma: no cover - optional path
@@ -205,20 +207,21 @@ class OpenAIBaselineAgent:
             "action_history": [record.model_dump(mode="json") for record in observation.action_history],
             "episode_phase": observation.episode_phase,
         }
+        messages: list[ChatCompletionMessageParam] = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a customer-support policy agent. Return exactly one JSON object "
+                    "that matches the Action schema."
+                ),
+            },
+            {"role": "user", "content": json.dumps(prompt)},
+        ]
         completion = self._client.chat.completions.create(
             model=self._model,
             temperature=0.0,
             response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",  # type: ignore[dict-item]
-                    "content": (
-                        "You are a customer-support policy agent. Return exactly one JSON object "
-                        "that matches the Action schema."
-                    ),
-                },
-                {"role": "user", "content": json.dumps(prompt)},  # type: ignore[dict-item]
-            ],
+            messages=messages,
         )
         raw_content = completion.choices[0].message.content or ""
         if isinstance(raw_content, list):
@@ -267,7 +270,10 @@ def run_episode(env: BusinessPolicyComplianceEnv, agent: _Agent, scenario_id: st
 
 def run_baseline(agent_name: str = "rule", model: str = "gpt-4.1-mini", seed: int = 42) -> dict[str, Any]:
     env = BusinessPolicyComplianceEnv(variation_seed=seed)
-    agent = RuleBasedAgent() if agent_name == "rule" else OpenAIBaselineAgent(model=model)
+    if agent_name == "rule":
+        agent: _Agent = RuleBasedAgent()
+    else:
+        agent = OpenAIBaselineAgent(model=model)
     summary: dict[str, Any] = {"agent": agent_name, "results": {}}
 
     for task_name in ["easy", "medium", "hard"]:
@@ -293,7 +299,6 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     print(json.dumps(run_baseline(agent_name=args.agent, model=args.model, seed=args.seed), indent=2))
-
 
 if __name__ == "__main__":
     main()

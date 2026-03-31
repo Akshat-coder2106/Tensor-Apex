@@ -60,18 +60,19 @@ Each observation includes:
 - `agent_notes`: rolling reasoning memory synthesized from submitted action rationale.
 - `policy_version` and `episode_phase`.
 - Multimodal attachment fields: `attachment_present`, `attachment_summary`, `attachment_signals`.
-- Optional pending policy shift metadata: `policy_shift_pending`, `policy_shift_at_step`, `policy_shift_to`.
+- Optional pending policy shift signal: `policy_shift_pending`.
 - `specialist_feedback` when a specialist review has been requested.
 - Only visible account flags (hidden risk flags stay internal for partial observability).
 - Raw attachment path is internal only (not exposed in `Observation`).
 
 ## Multimodal Design
 
-Attachment-derived signals are precomputed offline and stored in scenario templates (`data_generation.py`).
+Attachment-derived signals are manually authored and stored in scenario templates (`data_generation.py`).
 Runtime remains deterministic:
 - No VL model calls in `step()`
 - No grader-time image inference
 - Agent receives only structured fields (`attachment_summary`, `attachment_signals`)
+- Local PNG fixture files may be bundled for demos, but no vision model is used at runtime
 - Internal-only `attachment_path` stays inside snapshots/ground truth for audit/debug
 
 ## Action Space
@@ -99,6 +100,7 @@ Runtime remains deterministic:
 | Policy history penalty | Any policy violation occurred earlier in episode | -0.08 | Applied on final step for persistent demerit |
 | SLA crossed during snooze | Snooze pushes age past 72h | -0.1 | Immediate |
 | Fraud missed | No `flag_fraud` in fraud scenario | -0.15 | Episode-end penalty |
+| False-positive fraud flag | `flag_fraud` used in a benign scenario | -0.10 | Episode-end penalty |
 | Partial progress | Correct work completed so far | 0.0-current task score | Returned each step |
 | Final grader score | Episode complete | 0.0-1.0 | Full grader runs on `done` |
 | Efficiency bonus | Finished in <= half allowed steps | +0.1 | Episode-end bonus |
@@ -191,11 +193,9 @@ Baseline runs are deterministic by default (fixed variation seed). Override with
 For hackathon pre-validation, the root-level inference script is:
 - `inference.py`
 
-It supports two modes:
-- `--agent openai` (default): uses OpenAI client with required env vars
-- `--agent rule`: deterministic no-API baseline
+It runs a sequential OpenAI-client agent across all `easy`, `medium`, and `hard` scenarios and prints a JSON summary.
 
-Required env vars for OpenAI mode:
+Required env vars:
 - `API_BASE_URL`
 - `MODEL_NAME`
 - `HF_TOKEN`
@@ -206,11 +206,6 @@ export API_BASE_URL="https://router.huggingface.co/v1"
 export MODEL_NAME="openai/gpt-4.1-mini"
 export HF_TOKEN="hf_xxx"
 python inference.py --seed 42
-```
-
-Deterministic fallback:
-```bash
-python inference.py --agent rule --seed 42
 ```
 
 ## Project Layout

@@ -8,7 +8,7 @@ description: >-
   Some scenarios include deterministic policy drift (v1->v2) and action-cost
   efficiency tradeoffs, adversarial user deception, hidden risk state, and
   specialist-review interaction.
-entrypoint: business_policy_env.server:app
+entrypoint: server.app:app
 framework: fastapi
 language: python
 port: 7860
@@ -49,8 +49,11 @@ observation:
   agent_notes:
     - string
 multimodal:
-  preprocessing: vl_jepa
+  preprocessing: manual
   runtime_inference: false
   signals_precomputed: true
   image_format: png
-  max_signals_per_attachment: 6
+  notes: >-
+    Attachment signals are manually authored structured strings
+    simulating the output of visual preprocessing. Local PNG fixture
+    files are bundled for demos, but no vision model is used at runtime.

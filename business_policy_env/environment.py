@@ -274,8 +274,6 @@ class BusinessPolicyComplianceEnv:
             policy_rules=policy_rules_for(self._active_policy_version),
             policy_version=self._active_policy_version,
             policy_shift_pending=policy_shift_pending,
-            policy_shift_at_step=scenario.policy_shift_step if policy_shift_pending else None,
-            policy_shift_to=scenario.policy_shift_to if policy_shift_pending else None,
             specialist_feedback=self._specialist_feedback,
             attachment_present=snapshot.attachment_present,
             attachment_summary=snapshot.vl_jepa_summary,
@@ -300,7 +298,7 @@ class BusinessPolicyComplianceEnv:
             self._grade_snapshot(),
             policy_version=self._active_policy_version,
         )
-        return current_progress(actions, grading_payload)[0] >= 0.3
+        return current_progress(actions, grading_payload)[0] >= 0.5
 
     def _advance_phase(self, action: Action) -> None:
         phase = self.episode_phase
@@ -513,6 +511,11 @@ class BusinessPolicyComplianceEnv:
 
         scenario = self._active_snapshot()
         active_snapshot = self._grade_snapshot()
+        policy_shift_pending = (
+            scenario.policy_shift_step is not None
+            and scenario.policy_shift_to is not None
+            and not self._policy_shift_applied
+        )
         ground_truth = (
             build_ground_truth_payload(
                 scenario,
@@ -534,8 +537,9 @@ class BusinessPolicyComplianceEnv:
                 "title": scenario.title,
                 "policy_version": self._active_policy_version,
                 "initial_policy_version": scenario.policy_version,
-                "policy_shift_step": scenario.policy_shift_step,
-                "policy_shift_to": scenario.policy_shift_to,
+                "policy_shift_pending": policy_shift_pending,
+                "policy_shift_step": scenario.policy_shift_step if include_ground_truth else None,
+                "policy_shift_to": scenario.policy_shift_to if include_ground_truth else None,
                 "cost_budget": scenario.cost_budget,
                 "min_steps_before_completion": scenario.min_steps_before_completion,
             },
