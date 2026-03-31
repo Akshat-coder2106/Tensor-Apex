@@ -23,6 +23,7 @@ from .models import (
 @dataclass
 class AttachmentSignals:
     attachment_present: bool
+    # Optional local demo asset; runtime grading uses only the structured summary/signals fields.
     attachment_path: str | None = None
     vl_jepa_summary: str = ""
     vl_jepa_signals: list[str] = field(default_factory=list)

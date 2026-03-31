@@ -179,8 +179,6 @@ class Observation(BaseModel):
     policy_rules: list[str]
     policy_version: PolicyVersion = "v1"
     policy_shift_pending: bool = False
-    policy_shift_at_step: int | None = None
-    policy_shift_to: PolicyVersion | None = None
     specialist_feedback: str | None = None
     attachment_present: bool = False
     attachment_summary: str = ""
