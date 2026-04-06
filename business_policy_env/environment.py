@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any
@@ -19,6 +20,7 @@ from .models import (
     TicketSnapshot,
 )
 from .policies import check_policy_violations, policy_rules_for
+from .reasoning_utils import reasoning_depth_label
 from .rewards import current_progress, invalid_action_breakdown, shaped_reward
 from .tasks import (
     build_ground_truth_payload,
@@ -48,6 +50,8 @@ class BusinessPolicyComplianceEnv:
         self._episode_recorded = False
         self._policy_violation_seen = False
         self._agent_notes: list[str] = []
+        self._clarification_rounds: list[EmailMessage] = []
+        self._clarification_round_index = 0
         self._logger = ActionLogger()
         self._variation_counter = 0
         self._variation_seed = (
@@ -154,6 +158,77 @@ class BusinessPolicyComplianceEnv:
             return "medium"
         return "easy"
 
+    def _clarification_rounds_remaining(self) -> int:
+        return max(0, len(self._clarification_rounds) - self._clarification_round_index)
+
+    def _split_clarification_message(
+        self,
+        message: EmailMessage,
+        *,
+        force_two: bool = False,
+    ) -> list[EmailMessage]:
+        body = message.body.strip()
+        if not body:
+            return [message]
+
+        segments = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", body) if segment.strip()]
+        if len(segments) == 1:
+            segment = segments[0]
+            if force_two or len(segment) > 140:
+                midpoint = len(segment) // 2
+                split_at = segment.rfind(" ", 0, midpoint)
+                if split_at < 30:
+                    split_at = segment.find(" ", midpoint)
+                if split_at > 0:
+                    first = segment[:split_at].strip()
+                    second = segment[split_at + 1 :].strip()
+                    if first and second:
+                        segments = [first, second]
+
+        if len(segments) <= 1:
+            return [message]
+
+        parts: list[EmailMessage] = []
+        for idx, segment in enumerate(segments):
+            parts.append(
+                message.model_copy(
+                    update={
+                        "body": segment,
+                        "message_id": f"{message.message_id}_part{idx + 1}",
+                    }
+                )
+            )
+        return parts
+
+    def _prepare_clarification_rounds(self) -> None:
+        self._clarification_rounds = []
+        self._clarification_round_index = 0
+        scenario = self._active_snapshot()
+        if scenario.clarification_snapshot is None:
+            return
+
+        base_thread_len = len(scenario.initial_snapshot.thread)
+        extra_messages = scenario.clarification_snapshot.thread[base_thread_len:]
+        if not extra_messages:
+            return
+
+        rounds: list[EmailMessage] = []
+        for message in extra_messages:
+            rounds.extend(self._split_clarification_message(message))
+
+        if scenario.ground_truth.requires_request_info and len(rounds) == 1:
+            rounds = self._split_clarification_message(rounds[0], force_two=True)
+
+        for idx, message in enumerate(rounds):
+            self._clarification_rounds.append(
+                message.model_copy(
+                    update={
+                        "message_id": f"{message.message_id}_round{idx + 1}",
+                        "timestamp": message.timestamp + timedelta(minutes=idx * 3),
+                    }
+                )
+            )
+
     def _active_snapshot(self) -> TaskScenario:
         if self.current_scenario is None:
             raise RuntimeError("Environment has not been reset.")
@@ -161,13 +236,34 @@ class BusinessPolicyComplianceEnv:
 
     def _current_snapshot(self) -> TicketSnapshot:
         scenario = self._active_snapshot()
-        if self.clarification_received and scenario.clarification_snapshot is not None:
+        if not self._clarification_rounds or self._clarification_round_index <= 0:
+            return scenario.initial_snapshot
+
+        revealed_count = min(self._clarification_round_index, len(self._clarification_rounds))
+        if scenario.clarification_snapshot is not None and revealed_count >= len(self._clarification_rounds):
             return scenario.clarification_snapshot
-        return scenario.initial_snapshot
+
+        partial_snapshot = scenario.initial_snapshot.model_copy(deep=True)
+        partial_snapshot.thread = list(scenario.initial_snapshot.thread) + [
+            message.model_copy(deep=True) for message in self._clarification_rounds[:revealed_count]
+        ]
+
+        if scenario.clarification_snapshot is not None:
+            clarification_snapshot = scenario.clarification_snapshot
+            if clarification_snapshot.refund_amount is not None and revealed_count > 0:
+                partial_snapshot.refund_amount = clarification_snapshot.refund_amount
+            partial_snapshot.attachment_present = clarification_snapshot.attachment_present
+            partial_snapshot.attachment_path = clarification_snapshot.attachment_path
+            partial_snapshot.vl_jepa_summary = clarification_snapshot.vl_jepa_summary
+            partial_snapshot.vl_jepa_signals = list(clarification_snapshot.vl_jepa_signals)
+            for flag in clarification_snapshot.account_flags:
+                if flag not in partial_snapshot.account_flags:
+                    partial_snapshot.account_flags.append(flag)
+
+        return partial_snapshot
 
     def _grade_snapshot(self) -> TicketSnapshot:
-        scenario = self._active_snapshot()
-        return scenario.clarification_snapshot or scenario.initial_snapshot
+        return self._current_snapshot()
 
     def _base_issue_age_hours(self) -> float:
         scenario = self._active_snapshot()
@@ -215,27 +311,11 @@ class BusinessPolicyComplianceEnv:
         return self._logger.get_episode_actions()
 
     def _reasoning_depth(self) -> str:
-        if len(self._agent_notes) < 2:
-            return "shallow"
-
-        all_notes = " ".join(self._agent_notes).lower()
-        cross_reference_terms = [
-            "previous",
-            "earlier",
-            "thread",
-            "history",
-            "already",
-            "attachment",
-            "mentioned",
-            "follow-up",
-        ]
-        cross_refs = sum(1 for term in cross_reference_terms if term in all_notes)
-        unique_types = len({record.action.action_type for record in self.action_history})
-        if cross_refs >= 3 and unique_types >= 3:
-            return "deep"
-        if cross_refs >= 1 or unique_types >= 2:
-            return "moderate"
-        return "shallow"
+        return reasoning_depth_label(
+            text=" ".join(self._agent_notes),
+            entry_count=len(self._agent_notes),
+            unique_action_types=len({record.action.action_type for record in self.action_history}),
+        )
 
     def _observation(self) -> Observation:
         scenario = self._active_snapshot()
@@ -253,11 +333,6 @@ class BusinessPolicyComplianceEnv:
                     body=self._specialist_feedback,
                 )
             )
-        policy_shift_pending = (
-            scenario.policy_shift_step is not None
-            and scenario.policy_shift_to is not None
-            and not self._policy_shift_applied
-        )
         return Observation(
             scenario_id=scenario.scenario_id,
             difficulty=scenario.difficulty,
@@ -267,13 +342,13 @@ class BusinessPolicyComplianceEnv:
             account_flags=snapshot.account_flags,
             refund_amount=snapshot.refund_amount,
             issue_age_hours=self._issue_age_hours(),
-            emails_remaining=1,
+            emails_remaining=self._clarification_rounds_remaining(),
             steps_taken=len(self.action_history),
             max_steps=scenario.max_steps,
             action_history=self.action_history,
             policy_rules=policy_rules_for(self._active_policy_version),
             policy_version=self._active_policy_version,
-            policy_shift_pending=policy_shift_pending,
+            policy_shift_pending=False,
             specialist_feedback=self._specialist_feedback,
             attachment_present=snapshot.attachment_present,
             attachment_summary=snapshot.vl_jepa_summary,
@@ -286,6 +361,9 @@ class BusinessPolicyComplianceEnv:
 
     def _completion_reached(self) -> bool:
         scenario = self._active_snapshot()
+        if scenario.ground_truth.requires_request_info and self._clarification_rounds_remaining() > 0:
+            return False
+
         completed_types = {record.action.action_type for record in self.action_history}
         required_types = set(scenario.ground_truth.completion_action_types)
         meets_min_steps = len(self.action_history) >= scenario.min_steps_before_completion
@@ -298,7 +376,8 @@ class BusinessPolicyComplianceEnv:
             self._grade_snapshot(),
             policy_version=self._active_policy_version,
         )
-        return current_progress(actions, grading_payload)[0] >= 0.5
+        min_completion_score = 0.65 if scenario.difficulty == "hard" else 0.5
+        return current_progress(actions, grading_payload)[0] >= min_completion_score
 
     def _advance_phase(self, action: Action) -> None:
         phase = self.episode_phase
@@ -312,20 +391,25 @@ class BusinessPolicyComplianceEnv:
             "consult_specialist",
         }
 
+        if action.action_type == "request_info" and self._clarification_rounds_remaining() > 0:
+            self.episode_phase = EpisodePhase.awaiting_clarification
+            return
+
         if phase == EpisodePhase.initial:
             if action.action_type == "request_info":
-                self.episode_phase = EpisodePhase.awaiting_clarification
+                self.episode_phase = (
+                    EpisodePhase.awaiting_clarification
+                    if self._clarification_rounds_remaining() > 0
+                    else EpisodePhase.post_clarification
+                )
             elif action.action_type in resolving_actions:
                 self.episode_phase = EpisodePhase.resolving
         elif phase == EpisodePhase.awaiting_clarification:
-            if self.clarification_received:
+            if self.clarification_received and self._clarification_rounds_remaining() == 0:
                 self.episode_phase = EpisodePhase.post_clarification
         elif phase == EpisodePhase.post_clarification:
             if action.action_type in resolving_actions:
                 self.episode_phase = EpisodePhase.resolving
-
-        if self.episode_phase == EpisodePhase.awaiting_clarification and self.clarification_received:
-            self.episode_phase = EpisodePhase.post_clarification
 
         if self._completion_reached() or self.done:
             self.episode_phase = EpisodePhase.complete
@@ -334,6 +418,8 @@ class BusinessPolicyComplianceEnv:
         self.current_scenario = self._select_scenario(task_name, scenario_id)
         self.action_history = []
         self._agent_notes = []
+        self._clarification_rounds = []
+        self._clarification_round_index = 0
         self._logger.new_episode()
         self.clarification_received = False
         self.episode_phase = EpisodePhase.initial
@@ -345,6 +431,7 @@ class BusinessPolicyComplianceEnv:
         self._episode_recorded = False
         self._policy_violation_seen = False
         self.done = False
+        self._prepare_clarification_rounds()
         return self._observation()
 
     def step(self, action_input: Action | dict[str, Any]) -> tuple[Observation, float, bool, dict[str, Any]]:
@@ -430,9 +517,9 @@ class BusinessPolicyComplianceEnv:
 
         if (
             action.action_type == "request_info"
-            and scenario.clarification_snapshot is not None
-            and not self.clarification_received
+            and self._clarification_rounds_remaining() > 0
         ):
+            self._clarification_round_index += 1
             self.clarification_received = True
         elif action.action_type == "consult_specialist":
             self._specialist_feedback = scenario.specialist_decision or self._fallback_specialist_feedback()
@@ -512,7 +599,8 @@ class BusinessPolicyComplianceEnv:
         scenario = self._active_snapshot()
         active_snapshot = self._grade_snapshot()
         policy_shift_pending = (
-            scenario.policy_shift_step is not None
+            include_ground_truth
+            and scenario.policy_shift_step is not None
             and scenario.policy_shift_to is not None
             and not self._policy_shift_applied
         )
@@ -542,10 +630,13 @@ class BusinessPolicyComplianceEnv:
                 "policy_shift_to": scenario.policy_shift_to if include_ground_truth else None,
                 "cost_budget": scenario.cost_budget,
                 "min_steps_before_completion": scenario.min_steps_before_completion,
+                "clarification_rounds_remaining": self._clarification_rounds_remaining(),
             },
             "policy_rules": policy_rules_for(self._active_policy_version),
             "internal_variables": {
                 "clarification_received": self.clarification_received,
+                "clarification_round_index": self._clarification_round_index,
+                "clarification_round_count": len(self._clarification_rounds),
                 "episode_phase": self.episode_phase,
                 "simulated_offset_hours": self._simulated_offset_hours,
                 "snooze_crossed_sla": self._snooze_crossed_sla,
@@ -575,8 +666,20 @@ class BusinessPolicyComplianceEnv:
             None,
         )
         snapshot = self._current_snapshot()
-        flags = set(snapshot.account_flags + snapshot.internal_flags)
-        if any(flag in {"fraud_risk", "ato_watch", "chargeback_risk"} for flag in flags):
+        flags = set(snapshot.account_flags)
+        thread_text = " ".join(message.body.lower() for message in snapshot.thread)
+        visible_fraud_cues = {
+            "chargeback",
+            "stolen",
+            "unauthorized",
+            "card testing",
+            "multiple cards",
+            "identity theft",
+            "bypass review",
+        }
+        if any(flag in {"fraud_risk", "chargeback", "disputed_payment"} for flag in flags) or any(
+            cue in thread_text for cue in visible_fraud_cues
+        ):
             return (
                 "Specialist: Freeze risky transaction flow, flag fraud, and route to risk operations "
                 "for verification."

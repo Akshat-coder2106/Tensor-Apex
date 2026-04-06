@@ -18,6 +18,7 @@ Current benchmarks fail along three specific axes:
 **No action grounding verification.** Benchmarks reward language quality independently of operational correctness. An agent that fabricates having taken an action — "we have already processed your refund and escalated to our specialist team" — when neither action was executed in the environment gets full response quality credit. Tensor-Apex explicitly detects and penalizes this pattern.
 
 Tensor-Apex was built to fix all three failures simultaneously across enterprise customer support plus adjacent compliance-heavy verticals (HR operations and financial-services operations), where policy complexity is real and behavioral evaluation requirements are not yet served by existing public benchmarks.
+In benchmarking terms, the target is the "enterprise operations" gap: not toy chat tasks, but policy-constrained workflows where mistakes have operational and compliance cost.
 
 ---
 
@@ -79,6 +80,7 @@ Every grader component maps to one of these four signals. Judges can interpret a
 - `thread_directions`
 
 `ScenarioFactory` uses deterministic seed-based generation, timestamp construction, stylization, hidden-flag handling, and ground-truth assembly.
+The adversarial pattern taxonomy (`refund_already_processed`, `policy_gaming_refund_pressure`, `keyword_refund_trap`, `sarcastic_mixed_intent`, `delayed_escalation_chain`) is grounded in publicly documented customer-support and trust/safety failure modes, then encoded deterministically for reproducible scoring.
 
 ### Environment Dynamics (`environment.py`)
 
@@ -106,6 +108,7 @@ Anti-gaming text stack:
 - `_response_structure_score`
 - `_response_action_consistency_score`
 - `_hybrid_response_score`
+- `_semantic_variants` synonym expansion to reduce paraphrase brittleness in keyword-linked components (for example refund/reimburse/credit families)
 
 Fraud logic:
 - `_fraud_score` gives proportional credit for late fraud flagging: `threshold / detection_step`
@@ -129,6 +132,12 @@ Hard grader weights (sum = 1.0):
 - `policy_compliance`: 0.06
 - `customer_quality`: 0.07
 - `temporal_reasoning`: 0.04
+
+Calibration evidence is enforced in tests, including:
+- `test_hard_response_prefers_thread_grounded_reply`
+- `test_keyword_stuffing_is_penalized_vs_balanced_response`
+- `test_hard_response_action_consistency_detects_false_claims`
+- `test_hard_response_action_consistency_detects_category_claim_mismatch`
 
 ### Reward Shaping (`rewards.py`)
 

@@ -1,3 +1,0 @@
-# Lockfile placeholder for OpenEnv multi-mode deployment validation.
-# Dependencies remain installable via `pip install -e .` and can be
-# regenerated with `uv lock` in environments where `uv` is available.

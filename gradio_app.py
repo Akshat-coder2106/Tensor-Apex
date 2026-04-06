@@ -42,7 +42,7 @@ def format_observation(obs) -> str:
     lines = [
         f"**Scenario:** {obs.scenario_id} [{obs.difficulty}]",
         f"**Policy version:** {obs.policy_version}",
-        "**Policy shift:** pending" if obs.policy_shift_pending else "**Policy shift:** none pending",
+        "**Policy shift signal:** hidden (agent must infer from active rules)",
         f"**Phase:** {obs.episode_phase}",
         f"**Steps:** {obs.steps_taken}/{obs.max_steps}",
         f"**Issue age:** {obs.issue_age_hours:.1f}h",
@@ -410,14 +410,10 @@ def run_demo(
 
     scenario = scenario_registry()[scenario_id]
     diff_emoji = _DIFFICULTY_EMOJI.get(scenario.difficulty, "⚪")
-    policy_shift_note = (
-        " → policy update pending" if obs.policy_shift_pending else ""
-    )
-
     log_lines: list[str] = [
         f"## {diff_emoji} {scenario.title}",
         f"> **Objective:** {scenario.objective}",
-        f"> **Policy:** {obs.policy_version}{policy_shift_note}",
+        f"> **Policy:** {obs.policy_version} (shift signal hidden)",
         f"> **Max steps:** {obs.max_steps} | **Cost budget:** ${scenario.cost_budget:.2f}",
         "",
         f"**📧 Ticket ({obs.sender_tier.upper()} | age {obs.issue_age_hours:.1f}h)**",

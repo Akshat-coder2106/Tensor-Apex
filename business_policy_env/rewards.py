@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 
 from .models import Action, RewardBreakdown
+from .reasoning_utils import reasoning_depth_label
 from .tasks import GroundTruthPayload, component_scores, context_usage_score, grade_actions
 
 VALID_ACTION_REWARD = 0.05
@@ -21,6 +22,8 @@ DELAYED_FRAUD_PENALTY = -0.12
 EARLY_MISROUTE_PENALTY = -0.08
 CONTEXT_IGNORANCE_PENALTY = -0.05
 CROSS_PARTITION_BONUS = 0.05
+REASONING_DEPTH_MODERATE_BONUS = 0.01
+REASONING_DEPTH_DEEP_BONUS = 0.03
 
 
 def _clamp_reward(value: float) -> float:
@@ -132,6 +135,19 @@ def _cross_partition_bonus(actions: list[Action], ground_truth: GroundTruthPaylo
     return 0.0
 
 
+def _reasoning_depth_bonus(actions: list[Action]) -> float:
+    depth = reasoning_depth_label(
+        text=" ".join(action.reasoning or "" for action in actions),
+        entry_count=len(actions),
+        unique_action_types=len({action.action_type for action in actions}),
+    )
+    if depth == "deep":
+        return REASONING_DEPTH_DEEP_BONUS
+    if depth == "moderate":
+        return REASONING_DEPTH_MODERATE_BONUS
+    return 0.0
+
+
 def shaped_reward(
     actions: list[Action],
     ground_truth: GroundTruthPayload,
@@ -173,6 +189,7 @@ def shaped_reward(
             if ground_truth.get("history_keywords") and memory_score < 0.3
             else 0.0
         )
+        reasoning_depth_bonus = _reasoning_depth_bonus(actions)
         cross_partition_bonus = _cross_partition_bonus(actions, ground_truth)
         cost_adjustment = _cost_adjustment(action_cost, cost_budget)
         final_reward = _clamp_reward(
@@ -188,6 +205,7 @@ def shaped_reward(
             + delayed_fraud_penalty
             + misroute_penalty
             + context_ignorance_penalty
+            + reasoning_depth_bonus
             + cross_partition_bonus
             + cost_adjustment
         )
@@ -202,6 +220,7 @@ def shaped_reward(
                 "early_misroute_penalty": misroute_penalty,
                 "memory_score_component": round(memory_score, 4),
                 "context_ignorance_penalty": context_ignorance_penalty,
+                "reasoning_depth_bonus": reasoning_depth_bonus,
                 "cross_partition_bonus": cross_partition_bonus,
                 "cost_adjustment": cost_adjustment,
             }

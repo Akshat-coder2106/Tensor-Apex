@@ -254,15 +254,19 @@ def _thread_grounding_score(response_text: str | None, ground_truth: GroundTruth
 
 
 def _response_structure_score(response_text: str | None) -> float:
+    return _response_planning_signal_score(
+        response_text,
+        forward_terms=["will", "follow up", "investigat", "review", "update", "escalat", "diagnos", "confirm"],
+    )
+
+
+def _response_planning_signal_score(response_text: str | None, *, forward_terms: list[str]) -> float:
     if not response_text:
         return 0.0
     lowered = response_text.lower()
     timeline = any(signal in lowered for signal in ["today", "within", "hour", "day", "timeline", "next step"])
     ownership = any(signal in lowered for signal in ["we ", "our team", "assigned", "owner", "i will"])
-    forward_plan = any(
-        signal in lowered
-        for signal in ["will", "follow up", "investigat", "review", "update", "escalat", "diagnos", "confirm"]
-    )
+    forward_plan = any(signal in lowered for signal in forward_terms)
     return round((float(timeline) + float(ownership) + float(forward_plan)) / 3.0, 4)
 
 
@@ -372,7 +376,7 @@ def context_usage_score(actions: list[Action], ground_truth: GroundTruthPayload)
 
     draft = latest_action(actions, "draft_response")
     if draft is None or not draft.response_text:
-        return 0.5
+        return 0.0
 
     lowered = draft.response_text.lower()
     hits = sum(1 for keyword in history_keywords if keyword.lower() in lowered)
@@ -405,16 +409,10 @@ def _response_policy_citation_score(
 
 
 def _response_resolution_completeness_score(response_text: str | None) -> float:
-    if not response_text:
-        return 0.0
-    lowered = response_text.lower()
-    timeline = any(signal in lowered for signal in ["today", "within", "hour", "day", "timeline", "next step"])
-    ownership = any(signal in lowered for signal in ["we ", "our team", "assigned", "owner", "i will"])
-    concrete_next_step = any(
-        signal in lowered
-        for signal in ["follow up", "investigat", "review", "update", "resolve", "diagnos", "confirm"]
+    return _response_planning_signal_score(
+        response_text,
+        forward_terms=["follow up", "investigat", "review", "update", "resolve", "diagnos", "confirm"],
     )
-    return round((float(timeline) + float(ownership) + float(concrete_next_step)) / 3.0, 4)
 
 
 def _response_tone_score(response_text: str | None) -> float:
@@ -431,6 +429,39 @@ def _response_tone_score(response_text: str | None) -> float:
     if hostile:
         base *= 0.4
     return round(base, 4)
+
+
+def _semantic_integrity_score(response_text: str | None) -> float:
+    if not response_text:
+        return 0.0
+
+    lowered = response_text.lower()
+    tokens = [token for token in _normalized_tokens(response_text) if len(token) > 2]
+    if not tokens:
+        return 0.0
+
+    counts = Counter(tokens)
+    unique_ratio = len(counts) / len(tokens)
+    max_repeat_ratio = max(counts.values()) / len(tokens)
+    sentence_count = max(1, len(re.findall(r"[.!?]", response_text)))
+    action_language = any(
+        signal in lowered
+        for signal in ["will", "review", "investig", "update", "escalat", "diagnos", "confirm", "resolve"]
+    )
+    ownership_language = any(signal in lowered for signal in ["we ", "our team", "i will", "assigned"])
+
+    lexical_score = min(1.0, unique_ratio / 0.68)
+    length_score = min(1.0, len(tokens) / 14)
+    sentence_score = min(1.0, sentence_count / 2)
+    structure_score = (float(action_language) + float(ownership_language)) / 2.0
+
+    base = 0.3 * lexical_score + 0.25 * length_score + 0.2 * sentence_score + 0.25 * structure_score
+    if max_repeat_ratio > 0.25:
+        base *= max(0.2, 1.0 - ((max_repeat_ratio - 0.25) * 2.2))
+    if len(tokens) < 8:
+        base *= 0.7
+
+    return round(max(0.0, min(1.0, base)), 4)
 
 
 def _response_accuracy_score(
@@ -488,11 +519,19 @@ def _hybrid_response_score(
     structure = _response_structure_score(response_text)
     consistency = _response_action_consistency_score(actions, response_text)
     rubric = _response_rubric_score(response_text, ground_truth, actions)
-    blended_base = min(1.0, 0.35 * keyword_score + 0.3 * thread_grounding + 0.2 * structure + 0.15 * consistency)
-    return round(
-        min(1.0, 0.6 * blended_base + 0.4 * rubric),
-        4,
+    integrity = _semantic_integrity_score(response_text)
+    blended_base = min(
+        1.0,
+        0.2 * keyword_score
+        + 0.25 * thread_grounding
+        + 0.2 * structure
+        + 0.15 * consistency
+        + 0.2 * integrity,
     )
+    score = min(1.0, 0.45 * blended_base + 0.55 * rubric)
+    if integrity < 0.35:
+        score = min(score, round(0.2 + 0.45 * integrity, 4))
+    return round(score, 4)
 
 
 def _ambiguity_recognition_score(actions: list[Action], request_info_first_required: bool) -> float:
@@ -718,7 +757,7 @@ def easy_components(actions: list[Action], ground_truth: GroundTruthPayload) -> 
 
 def medium_grader(actions: list[Action], ground_truth: GroundTruthPayload) -> float:
     components = medium_components(actions, ground_truth)
-    return round(
+    score = round(
         0.16 * components["ambiguity_recognition"]
         + 0.12 * components["clarifying_question_quality"]
         + 0.15 * components["policy_compliance"]
@@ -730,6 +769,12 @@ def medium_grader(actions: list[Action], ground_truth: GroundTruthPayload) -> fl
         + 0.07 * components["adversarial_resilience"],
         4,
     )
+    asked_for_info = any(action.action_type == "request_info" for action in actions)
+    if bool(ground_truth["request_info_first_required"]) and not asked_for_info:
+        score = min(score, 0.49)
+    elif bool(ground_truth["requires_request_info"]) and not asked_for_info:
+        score = min(score, 0.55)
+    return round(score, 4)
 
 
 def medium_components(actions: list[Action], ground_truth: GroundTruthPayload) -> dict[str, float]:

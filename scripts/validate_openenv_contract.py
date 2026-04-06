@@ -8,7 +8,7 @@ from typing import Any
 
 from business_policy_env.server import app
 
-REQUIRED_ENDPOINTS = {"health", "tasks", "reset", "step", "state", "close_session"}
+REQUIRED_ENDPOINTS = {"health", "tasks", "reset", "step", "state", "schema", "close_session"}
 REQUIRED_TASKS = {"easy", "medium", "hard"}
 REQUIRED_ACTIONS = {
     "categorize",

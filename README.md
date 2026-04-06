@@ -16,7 +16,7 @@ Agents must route, prioritize, escalate, request clarification, flag fraud, and 
 ## What Makes This Hard
 
 - Adversarial users: contradictory refund claims, policy-gaming pressure, and keyword traps that punish naive routing.
-- Policy drift: episodes can switch from `v1` to `v2` mid-trajectory, requiring dynamic adaptation.
+- Policy drift: episodes can switch from `v1` to `v2` mid-trajectory, requiring dynamic adaptation without advance shift disclosure.
 - Delayed fraud detection: hidden-risk scenarios require timely fraud flagging; late detection loses proportional credit.
 - Multimodal evidence: attachment summaries/signals force reasoning across text + precomputed visual cues.
 
@@ -24,7 +24,9 @@ Agents must route, prioritize, escalate, request clarification, flag fraud, and 
 
 - Multi-domain tickets across billing, technical support, returns, legal, customer success, and spam.
 - Cross-vertical coverage beyond generic support: HR operations compliance and financial-services compliance.
-- 54 scenario templates (`10 easy`, `16 medium`, `28 hard`) with reset-time parameter perturbations to reduce memorization.
+- 54 canonical scenario templates (`10 easy`, `16 medium`, `28 hard`) plus deterministic reset-time variation.
+- Every episode is a seeded scenario variant via `_materialize_variant()` in `environment.py`:
+  age jitter (`±15%`), refund jitter (`±20%`), and account-flag permutation while preserving policy-threshold semantics.
 - Session-isolated API for concurrent judges and agents using `X-Session-Id`.
 - Multi-turn state machine (`episode_phase`) for clarification-sensitive workflows.
 - Policy versioning (`v1` and `v2`) to prevent fixed-policy memorization.
@@ -60,14 +62,15 @@ Each observation includes:
 - `agent_notes`: rolling reasoning memory synthesized from submitted action rationale.
 - `policy_version` and `episode_phase`.
 - Multimodal attachment fields: `attachment_present`, `attachment_summary`, `attachment_signals`.
-- Optional pending policy shift signal: `policy_shift_pending`.
+- Policy-shift timing is intentionally hidden from agent-facing observations (no advance drift signal).
 - `specialist_feedback` when a specialist review has been requested.
+- Clarification is progressive for ambiguous cases (`emails_remaining` decrements as each round is revealed).
 - Only visible account flags (hidden risk flags stay internal for partial observability).
 - Raw attachment path is internal only (not exposed in `Observation`).
 
 ## Multimodal Design
 
-Attachment-derived signals are manually authored and stored in scenario templates (`data_generation.py`).
+Attachment-derived signals are precomputed offline using a deterministic VL-JEPA-style pipeline + curated fixtures, then stored in scenario templates (`data_generation.py`).
 Runtime remains deterministic:
 - No VL model calls in `step()`
 - No grader-time image inference
@@ -155,6 +158,7 @@ FastAPI routes:
 - `POST /reset`
 - `POST /step`
 - `GET /state`
+- `GET /schema`
 - `DELETE /session`
 
 Session header:
@@ -224,6 +228,7 @@ business_policy_env/
     tasks.py
 gradio_app.py
 baseline.py
+inference.py
 openenv.yaml
 pyproject.toml
 tests/
@@ -231,6 +236,7 @@ tests/
 scripts/
     self_check.sh
     validate_openenv_contract.py
+    validate-submission.sh
     docker_smoke.sh
 .github/workflows/ci.yml
 Dockerfile
@@ -242,15 +248,40 @@ Install:
 ```bash
 .venv/bin/pip install -e ".[dev]"
 ```
+For the local Gradio judge UI:
+```bash
+.venv/bin/pip install -e ".[dev,ui]"
+```
+
+Optional `uv` workflow (if `uv` is installed):
+```bash
+uv sync
+```
+If you want a pinned lock locally, generate one with:
+```bash
+uv lock
+```
 
 Run API only:
 ```bash
-.venv/bin/uvicorn business_policy_env.server:app --host 0.0.0.0 --port 7860
+.venv/bin/uvicorn server.app:app --host 0.0.0.0 --port 7860
 ```
 
 Run Gradio + API:
 ```bash
 .venv/bin/python gradio_app.py
+```
+
+Run inference script (HTTP mode with structured `[START]/[STEP]/[END]` logs):
+```bash
+export API_BASE_URL="https://router.huggingface.co/v1"
+export MODEL_NAME="openai/gpt-4.1-mini"
+export HF_TOKEN="hf_..."
+export ENV_BASE_URL="http://127.0.0.1:7860"
+
+.venv/bin/python inference.py --task hard --seed 42
+# or
+.venv/bin/python inference.py --task all --seed 42
 ```
 
 Run checks:
@@ -272,6 +303,25 @@ Contract validation and runtime-proof helper scripts:
 
 CI includes a dedicated `runtime-proof` job that uploads validation/runtime artifacts.
 
+## Validation Evidence (Latest Local Run)
+
+Pytest (45 targeted tests):
+```text
+.............................................                            [100%]
+45 passed in 1.42s
+```
+
+OpenEnv contract validator:
+```json
+{
+  "ok": true,
+  "endpoint_keys": ["close_session", "health", "reset", "schema", "state", "step", "tasks"],
+  "errors": []
+}
+```
+
+Note: `openenv validate` and Docker smoke are supported by scripts in this repo; run them in your local/CI environment where `openenv` CLI and Docker are installed.
+
 ## Pre-Submission Validator
 
 Run the provided validator locally before submitting:
@@ -290,6 +340,10 @@ This checks:
 
 The Docker image:
 - Installs with `pip install -e .`
-- Exposes ports `7860` (API) and `7861` (Gradio)
+- Exposes port `7860` (API)
 - Health checks `http://127.0.0.1:7860/health`
-- Starts `python gradio_app.py`
+- Starts `uvicorn server.app:app --host 0.0.0.0 --port 7860`
+
+HF deployment note:
+- `app_port` is intentionally set to `7860` so automated validators can hit `/reset` on the public Space URL.
+- The interactive Gradio demo is for local judge walkthroughs (`python gradio_app.py`).

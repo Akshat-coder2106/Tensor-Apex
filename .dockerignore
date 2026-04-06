@@ -3,8 +3,14 @@ __pycache__/
 *.pyo
 *.pyd
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .venv/
 venv/
+*.egg-info/
+**/*.egg-info/
+.DS_Store
+**/.DS_Store
 .env
 .git/
 .gitignore

@@ -3,9 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 
 from .environment import BusinessPolicyComplianceEnv
-from .models import Observation, ResetRequest, StepRequest, StepResult
+from .models import Action, Observation, ResetRequest, StepRequest, StepResult
 
 app = FastAPI(
     title="Business Policy Compliance and Customer Resolution Environment",
@@ -24,6 +25,21 @@ def _get_or_create(session_id: str) -> BusinessPolicyComplianceEnv:
 
 def _session_or_default(x_session_id: str | None) -> str:
     return x_session_id or "default"
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> str:
+    return (
+        "<html><body style='font-family:system-ui;padding:24px;background:#0f172a;color:#e2e8f0;'>"
+        "<h2 style='margin:0 0 12px;'>Business Policy Compliance Environment</h2>"
+        "<p style='margin:0 0 10px;'>API server is running.</p>"
+        "<ul>"
+        "<li><a href='/docs' style='color:#7dd3fc;'>OpenAPI docs</a></li>"
+        "<li><a href='/tasks' style='color:#7dd3fc;'>List tasks</a></li>"
+        "<li><a href='/health' style='color:#7dd3fc;'>Health check</a></li>"
+        "</ul>"
+        "</body></html>"
+    )
 
 
 @app.get("/health")
@@ -49,6 +65,18 @@ def reset(
     return env.reset(task_name=payload.task_name, scenario_id=payload.scenario_id)
 
 
+@app.get("/reset", response_model=Observation)
+def reset_get(
+    task_name: str | None = None,
+    scenario_id: str | None = None,
+    x_session_id: str | None = Header(default=None),
+) -> Observation:
+    session_id = _session_or_default(x_session_id)
+    env = _get_or_create(session_id)
+    resolved_task = task_name if task_name in {"easy", "medium", "hard"} else None
+    return env.reset(task_name=resolved_task, scenario_id=scenario_id)
+
+
 @app.post("/step", response_model=StepResult)
 def step(
     request: StepRequest,
@@ -71,6 +99,19 @@ def state(
     if session_id not in _sessions:
         return {"active": False, "detail": "Session not found. Call /reset first."}
     return _sessions[session_id].state(include_ground_truth=include_ground_truth)
+
+
+@app.get("/schema")
+def schema() -> dict[str, Any]:
+    return {
+        "action": Action.model_json_schema(),
+        "observation": Observation.model_json_schema(),
+        "state": {
+            "type": "object",
+            "additionalProperties": True,
+            "description": "Environment state payload returned by GET /state.",
+        },
+    }
 
 
 @app.delete("/session")

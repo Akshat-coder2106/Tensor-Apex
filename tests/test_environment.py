@@ -6,13 +6,16 @@ import anyio
 import httpx
 from fastapi.testclient import TestClient
 
+import inference
 from business_policy_env.baseline import RuleBasedAgent, run_baseline
 from business_policy_env.environment import BusinessPolicyComplianceEnv
 from business_policy_env.models import Action
+from business_policy_env.policies import compute_policy_expectations
 from business_policy_env.rewards import shaped_reward
 from business_policy_env.server import app
 from business_policy_env.tasks import (
     build_ground_truth_payload,
+    context_usage_score,
     grade_actions,
     hard_components,
     medium_components,
@@ -134,7 +137,7 @@ class EnvironmentTests(unittest.TestCase):
     def test_dynamic_policy_shift_applies_mid_episode(self) -> None:
         observation = self.env.reset(scenario_id="medium_premier_same_day")
         self.assertEqual(observation.policy_version, "v1")
-        self.assertTrue(observation.policy_shift_pending)
+        self.assertFalse(observation.policy_shift_pending)
 
         self.env.step(
             Action(
@@ -154,6 +157,33 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(observation.policy_version, "v2")
         self.assertFalse(observation.policy_shift_pending)
         self.assertIn("Policy update applied", info["policy_event"])
+
+    def test_clarification_progresses_in_rounds(self) -> None:
+        observation = self.env.reset(scenario_id="medium_charge_or_bug")
+        self.assertGreaterEqual(observation.emails_remaining, 1)
+        remaining_before = observation.emails_remaining
+        first_seen_email = observation.current_email.body
+
+        observation, _, _, _ = self.env.step(
+            Action(
+                action_type="request_info",
+                reasoning="Need first clarification signal.",
+                clarifying_question="Can you share whether this is a charge issue or an app error?",
+            )
+        )
+        self.assertTrue(observation.clarification_received)
+        self.assertLess(observation.emails_remaining, remaining_before)
+        self.assertNotEqual(observation.current_email.body, first_seen_email)
+
+        while observation.emails_remaining > 0:
+            observation, _, _, _ = self.env.step(
+                Action(
+                    action_type="request_info",
+                    reasoning="Need the remaining details before committing a route.",
+                    clarifying_question="Can you confirm one more specific symptom and expected outcome?",
+                )
+            )
+        self.assertEqual(observation.emails_remaining, 0)
 
     def test_ambiguous_ticket_is_penalized_when_request_info_is_skipped(self) -> None:
         self.env.reset(scenario_id="medium_charge_or_bug")
@@ -182,6 +212,8 @@ class EnvironmentTests(unittest.TestCase):
         client = TestClient(app)
         reset_response = client.post("/reset", json={"scenario_id": "easy_sla_breach"})
         self.assertEqual(reset_response.status_code, 200)
+        reset_get_response = client.get("/reset")
+        self.assertEqual(reset_get_response.status_code, 200)
         step_response = client.post(
             "/step",
             json={
@@ -434,6 +466,95 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(obs_a.refund_amount, obs_b.refund_amount)
         self.assertEqual(obs_a.account_flags, obs_b.account_flags)
 
+    def test_context_usage_requires_draft_response(self) -> None:
+        scenario = scenario_registry()["hard_old_invoice_question"]
+        snapshot = scenario.clarification_snapshot or scenario.initial_snapshot
+        ground_truth = build_ground_truth_payload(scenario, snapshot)
+        self.assertTrue(ground_truth["history_keywords"])
+
+        actions = [
+            Action(action_type="categorize", reasoning="Billing route.", category="billing"),
+            Action(action_type="set_priority", reasoning="Urgent due age.", priority="urgent"),
+        ]
+        self.assertEqual(context_usage_score(actions, ground_truth), 0.0)
+
+    def test_legal_threat_detected_from_earlier_thread_message(self) -> None:
+        scenario = scenario_registry()["easy_legal_threat"]
+        snapshot = scenario.initial_snapshot.model_copy(deep=True)
+        first = snapshot.thread[0].model_copy(
+            update={
+                "message_id": f"{snapshot.thread[0].message_id}_first",
+                "body": "I will take legal action if this is not resolved.",
+            }
+        )
+        latest = snapshot.thread[0].model_copy(
+            update={
+                "message_id": f"{snapshot.thread[0].message_id}_latest",
+                "body": "Following up for a status update today.",
+            }
+        )
+        snapshot.thread = [first, latest]
+
+        expectations = compute_policy_expectations(snapshot, issue_age_hours=24.0, policy_version="v1")
+        self.assertTrue(expectations["requires_escalation"])
+        self.assertIn("legal_threat", expectations["triggered_rules"])
+
+    def test_inference_payload_exposes_emails_remaining(self) -> None:
+        obs = self.env.reset(scenario_id="medium_charge_or_bug")
+        payload = inference._observation_payload(obs)
+        self.assertIn("emails_remaining", payload)
+        self.assertEqual(payload["emails_remaining"], obs.emails_remaining)
+
+    def test_inference_default_task_is_all(self) -> None:
+        self.assertEqual(inference.TASK_NAME, "all")
+
+    def test_refund_jitter_preserves_threshold_semantics(self) -> None:
+        registry = scenario_registry()
+        for seed in (7, 42, 123):
+            env = BusinessPolicyComplianceEnv(variation_seed=seed)
+            for scenario_id, base_scenario in registry.items():
+                baseline_amount = (
+                    base_scenario.clarification_snapshot.refund_amount
+                    if (
+                        base_scenario.clarification_snapshot is not None
+                        and base_scenario.clarification_snapshot.refund_amount is not None
+                    )
+                    else base_scenario.initial_snapshot.refund_amount
+                )
+                if baseline_amount is None:
+                    continue
+
+                escalation_reason = (base_scenario.ground_truth.expected_escalation_reason or "").lower()
+                for _ in range(6):
+                    variant = env._materialize_variant(base_scenario)
+                    variant_amount = (
+                        variant.clarification_snapshot.refund_amount
+                        if (
+                            variant.clarification_snapshot is not None
+                            and variant.clarification_snapshot.refund_amount is not None
+                        )
+                        else variant.initial_snapshot.refund_amount
+                    )
+                    self.assertIsNotNone(variant_amount, msg=f"{scenario_id}: variant refund amount missing")
+                    assert variant_amount is not None
+
+                    if baseline_amount <= 500 and not base_scenario.ground_truth.expected_escalation:
+                        self.assertLessEqual(
+                            variant_amount,
+                            500.0,
+                            msg=f"{scenario_id}: non-escalation case crossed refund threshold ({variant_amount})",
+                        )
+
+                    if "refund exceeds" in escalation_reason:
+                        self.assertGreater(
+                            variant_amount,
+                            500.0,
+                            msg=(
+                                f"{scenario_id}: refund-threshold escalation case dropped below threshold "
+                                f"({variant_amount})"
+                            ),
+                        )
+
     def test_flag_fraud_scores_correctly(self) -> None:
         self.env.reset(scenario_id="hard_fraud_chargeback")
         _, reward, _, _ = self.env.step(
@@ -444,6 +565,27 @@ class EnvironmentTests(unittest.TestCase):
             )
         )
         self.assertGreater(reward, 0.0)
+
+    def test_false_positive_fraud_penalty_applies_when_not_expected(self) -> None:
+        self.env.reset(scenario_id="easy_vip_refund")
+        self.env.step(
+            Action(
+                action_type="flag_fraud",
+                reasoning="Intentional false positive test.",
+                fraud_reason="Flagging despite no fraud evidence to test penalty path.",
+            )
+        )
+        self.env.step(Action(action_type="categorize", reasoning="Billing route.", category="billing"))
+        self.env.step(Action(action_type="set_priority", reasoning="High for VIP.", priority="high"))
+        _, _, done, info = self.env.step(
+            Action(
+                action_type="escalate",
+                reasoning="Escalation due refund threshold.",
+                escalation_reason="Refund amount exceeds policy threshold.",
+            )
+        )
+        self.assertTrue(done)
+        self.assertEqual(info["reward_breakdown"]["false_positive_fraud_penalty"], -0.1)
 
     def test_rule_baseline_runs_one_episode(self) -> None:
         scenario_id = "hard_old_invoice_question"
@@ -587,6 +729,70 @@ class EnvironmentTests(unittest.TestCase):
         generic_score = hard_components(generic_actions, ground_truth)["response_completeness"]
         grounded_score = hard_components(grounded_actions, ground_truth)["response_completeness"]
         self.assertGreater(grounded_score, generic_score)
+
+    def test_hard_completion_requires_stronger_quality_bar(self) -> None:
+        self.env.reset(scenario_id="hard_old_invoice_question")
+        state = self.env.state(include_ground_truth=True)
+        ground_truth = state["ground_truth"]
+        assert ground_truth is not None
+        required = list(ground_truth["completion_action_types"])
+
+        def dispatch(action_type: str) -> Action:
+            if action_type == "request_info":
+                return Action(
+                    action_type="request_info",
+                    reasoning="Minimal clarification action for threshold test.",
+                    clarifying_question="Need details?",
+                )
+            if action_type == "flag_fraud":
+                return Action(
+                    action_type="flag_fraud",
+                    reasoning="Minimal fraud action for threshold test.",
+                    fraud_reason="Potential risk.",
+                )
+            if action_type == "categorize":
+                return Action(
+                    action_type="categorize",
+                    reasoning="Intentional mismatch to keep score below hard completion bar.",
+                    category="technical_support"
+                    if ground_truth["expected_category"] != "technical_support"
+                    else "billing",
+                )
+            if action_type == "set_priority":
+                return Action(
+                    action_type="set_priority",
+                    reasoning="Intentional mismatch to keep score below hard completion bar.",
+                    priority="low" if ground_truth["expected_priority"] != "low" else "urgent",
+                )
+            if action_type == "escalate":
+                return Action(
+                    action_type="escalate",
+                    reasoning="Escalate as expected.",
+                    escalation_reason=ground_truth["expected_escalation_reason"] or "Policy escalation.",
+                )
+            if action_type == "consult_specialist":
+                return Action(
+                    action_type="consult_specialist",
+                    reasoning="Specialist consultation as expected.",
+                    specialist_question="Please validate this handling path.",
+                )
+            return Action(
+                action_type="draft_response",
+                reasoning="Intentional low-quality keyword blob.",
+                response_text="refund duplicate chargeback escalated legal urgent",
+            )
+
+        info = {}
+        done = False
+        for action_type in required:
+            if action_type == "request_info":
+                while self.env.state()["current_task_configuration"]["clarification_rounds_remaining"] > 0:
+                    _, _, done, info = self.env.step(dispatch("request_info"))
+            else:
+                _, _, done, info = self.env.step(dispatch(action_type))
+
+        self.assertFalse(done)
+        self.assertLess(info.get("partial_score", 1.0), 0.65)
 
     def test_hard_response_action_consistency_detects_false_claims(self) -> None:
         scenario = scenario_registry()["hard_previous_agent_failed_escalation"]
@@ -1011,6 +1217,66 @@ class EnvironmentTests(unittest.TestCase):
         )
         self.assertEqual(grounded_breakdown.components["cross_partition_bonus"], 0.05)
         self.assertEqual(generic_breakdown.components["cross_partition_bonus"], 0.0)
+
+    def test_reasoning_depth_bonus_rewards_deeper_reasoning(self) -> None:
+        scenario = scenario_registry()["hard_old_invoice_question"]
+        snapshot = scenario.clarification_snapshot or scenario.initial_snapshot
+        ground_truth = build_ground_truth_payload(scenario, snapshot)
+
+        shallow_actions = [
+            Action(action_type="categorize", reasoning="billing", category="billing"),
+            Action(action_type="set_priority", reasoning="urgent", priority="urgent"),
+            Action(
+                action_type="draft_response",
+                reasoning="update",
+                response_text="We will review this and share an update.",
+            ),
+        ]
+        deep_actions = [
+            Action(
+                action_type="categorize",
+                reasoning="Based on previous thread history and invoice mention, route to billing.",
+                category="billing",
+            ),
+            Action(
+                action_type="set_priority",
+                reasoning="Earlier delay and history context indicate urgent handling.",
+                priority="urgent",
+            ),
+            Action(
+                action_type="draft_response",
+                reasoning="Attachment and history already mentioned; follow-up with concrete ownership.",
+                response_text="We reviewed your earlier invoice thread and will provide a timed follow-up.",
+            ),
+        ]
+
+        shallow_breakdown = shaped_reward(
+            shallow_actions,
+            ground_truth,
+            done=True,
+            max_steps=scenario.max_steps,
+            policy_violations=[],
+            action_cost=0.0,
+            cost_budget=scenario.cost_budget,
+            snooze_crossed_sla=False,
+            fraud_expected=bool(ground_truth["expected_flag_fraud"]),
+            policy_violation_seen=False,
+        )
+        deep_breakdown = shaped_reward(
+            deep_actions,
+            ground_truth,
+            done=True,
+            max_steps=scenario.max_steps,
+            policy_violations=[],
+            action_cost=0.0,
+            cost_budget=scenario.cost_budget,
+            snooze_crossed_sla=False,
+            fraud_expected=bool(ground_truth["expected_flag_fraud"]),
+            policy_violation_seen=False,
+        )
+
+        self.assertLessEqual(shallow_breakdown.components["reasoning_depth_bonus"], 0.01)
+        self.assertGreaterEqual(deep_breakdown.components["reasoning_depth_bonus"], 0.01)
 
 
 if __name__ == "__main__":

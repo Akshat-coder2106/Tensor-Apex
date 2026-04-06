@@ -6,15 +6,23 @@ import json
 import os
 import re
 import sys
+import time
+import uuid
 from pathlib import Path
 from statistics import mean
 from typing import Any
 
+import httpx
 from openai import OpenAI
 
-from business_policy_env.environment import BusinessPolicyComplianceEnv
 from business_policy_env.models import Action, Observation
-from business_policy_env.tasks import scenarios_for_task
+
+TASK_NAME = "all"
+BENCHMARK = "business-policy-compliance"
+MAX_STEPS = 16
+MAX_TOTAL_REWARD = 10.0
+SUCCESS_SCORE_THRESHOLD = 0.6
+MAX_RUNTIME_SECONDS = 18 * 60
 
 ACTION_REQUIREMENTS: dict[str, str | None] = {
     "categorize": "category",
@@ -40,6 +48,34 @@ def _empty_summary() -> dict[str, dict[str, float]]:
         "medium": {"mean": 0.0, "min": 0.0, "max": 0.0},
         "hard": {"mean": 0.0, "min": 0.0, "max": 0.0},
     }
+
+
+def _log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def _log_step(step: int, action: str, reward: float, done: bool, error: str | None) -> None:
+    print(
+        f"[STEP] step={step} action={action} reward={round(reward, 4)} done={done} error={error or 'None'}",
+        flush=True,
+    )
+
+
+def _log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    print(
+        f"[END] success={success} steps={steps} score={round(score, 4)} rewards={json.dumps(rewards)}",
+        flush=True,
+    )
+
+
+def _summary_score(summary: dict[str, dict[str, float]], selected_tasks: list[str]) -> float:
+    values = [
+        float(summary.get(task_name, {}).get("mean", 0.0))
+        for task_name in selected_tasks
+    ]
+    if not values:
+        return 0.0
+    return round(sum(values) / len(values), 4)
 
 
 def _load_dotenv() -> None:
@@ -143,7 +179,6 @@ def _observation_payload(observation: Observation) -> dict[str, Any]:
         "sender_tier": observation.sender_tier,
         "refund_amount": observation.refund_amount,
         "policy_version": observation.policy_version,
-        "policy_shift_pending": observation.policy_shift_pending,
         "specialist_feedback": observation.specialist_feedback,
         "attachment_present": observation.attachment_present,
         "attachment_summary": observation.attachment_summary,
@@ -151,6 +186,7 @@ def _observation_payload(observation: Observation) -> dict[str, Any]:
         "agent_notes": observation.agent_notes,
         "task_objective": observation.task_objective,
         "clarification_received": observation.clarification_received,
+        "emails_remaining": observation.emails_remaining,
         "episode_phase": observation.episode_phase,
         "steps_taken": observation.steps_taken,
         "max_steps": observation.max_steps,
@@ -188,6 +224,10 @@ class OpenAIEnvironmentAgent:
         self._client = client.with_options(timeout=12.0, max_retries=0)
         self._model = model
         self._llm_available = True
+
+    @property
+    def model_name(self) -> str:
+        return self._model
 
     def next_action(self, observation: Observation) -> Action:
         if not self._llm_available:
@@ -241,24 +281,105 @@ class OpenAIEnvironmentAgent:
             return _safe_default_action(observation)
 
 
-def _run_scenario(env: BusinessPolicyComplianceEnv, agent: OpenAIEnvironmentAgent, scenario_id: str) -> float:
+class HttpEnvironmentClient:
+    def __init__(self, *, base_url: str, session_id: str) -> None:
+        self._client = httpx.Client(base_url=base_url.rstrip("/"), timeout=20.0)
+        self._headers = {"X-Session-Id": session_id}
+
+    def close(self) -> None:
+        try:
+            self._client.delete("/session", headers=self._headers)
+        except Exception:
+            pass
+        self._client.close()
+
+    def tasks(self) -> dict[str, list[str]]:
+        response = self._client.get("/tasks", headers=self._headers)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid /tasks response payload.")
+        return {
+            key: [str(item) for item in value]
+            for key, value in payload.items()
+            if isinstance(value, list)
+        }
+
+    def reset(self, *, task_name: str | None = None, scenario_id: str | None = None) -> Observation:
+        payload: dict[str, Any] = {}
+        if task_name is not None:
+            payload["task_name"] = task_name
+        if scenario_id is not None:
+            payload["scenario_id"] = scenario_id
+        response = self._client.post("/reset", headers=self._headers, json=payload)
+        response.raise_for_status()
+        return Observation.model_validate(response.json())
+
+    def step(self, action: Action) -> tuple[Observation, float, bool, dict[str, Any]]:
+        payload = {"action": action.model_dump(mode="json")}
+        response = self._client.post("/step", headers=self._headers, json=payload)
+        response.raise_for_status()
+        body = response.json()
+        observation = Observation.model_validate(body.get("observation", {}))
+        reward = float(body.get("reward", 0.0))
+        done = bool(body.get("done", False))
+        info = body.get("info", {})
+        if not isinstance(info, dict):
+            info = {}
+        return observation, reward, done, info
+
+
+def _run_scenario(
+    env: HttpEnvironmentClient,
+    agent: OpenAIEnvironmentAgent,
+    *,
+    scenario_id: str,
+    deadline: float,
+    step_counter: int,
+) -> tuple[float, bool, list[float], int]:
+
+    if time.monotonic() >= deadline:
+        _log_step(step=step_counter, action="timeout", reward=0.0, done=True, error="runtime_limit_exceeded")
+        return 0.0, True, [], step_counter + 1
+
     try:
         observation = env.reset(scenario_id=scenario_id)
-    except Exception:
-        return 0.0
+    except Exception as exc:
+        _log_step(step=step_counter, action="reset", reward=0.0, done=True, error=str(exc))
+        print(f"inference warning: reset_failed scenario={scenario_id} error={exc}", file=sys.stderr)
+        return 0.0, False, [], step_counter + 1
 
     final_score = 0.0
-    max_turns = max(1, observation.max_steps + 1)
-    for _ in range(max_turns):
+    rewards: list[float] = []
+    step_limit = min(MAX_STEPS, max(1, observation.max_steps + 1))
+
+    for _ in range(step_limit):
+        if time.monotonic() >= deadline:
+            _log_step(step=step_counter, action="timeout", reward=0.0, done=True, error="runtime_limit_exceeded")
+            return max(0.0, min(1.0, round(final_score, 4))), True, rewards, step_counter + 1
+
+        action_error: str | None = None
         try:
             action = agent.next_action(observation)
-        except Exception:
+        except Exception as exc:
+            action_error = str(exc)
             action = _safe_default_action(observation)
 
         try:
-            observation, _reward, done, info = env.step(action)
-        except Exception:
-            return final_score
+            observation, reward, done, info = env.step(action)
+        except Exception as exc:
+            _log_step(step=step_counter, action=action.action_type, reward=0.0, done=True, error=str(exc))
+            return max(0.0, min(1.0, round(final_score, 4))), False, rewards, step_counter + 1
+
+        rewards.append(float(reward))
+        _log_step(
+            step=step_counter,
+            action=action.action_type,
+            reward=float(reward),
+            done=bool(done),
+            error=action_error,
+        )
+        step_counter += 1
 
         raw_score = info.get("final_score")
         if isinstance(raw_score, int | float):
@@ -266,41 +387,81 @@ def _run_scenario(env: BusinessPolicyComplianceEnv, agent: OpenAIEnvironmentAgen
         if done:
             break
 
-    return max(0.0, min(1.0, round(final_score, 4)))
+    return max(0.0, min(1.0, round(final_score, 4))), False, rewards, step_counter
 
 
-def run(seed: int = 42) -> dict[str, dict[str, float]]:
-    env = BusinessPolicyComplianceEnv(variation_seed=seed)
+def run(seed: int = 42, task: str = TASK_NAME, max_scenarios: int | None = None) -> dict[str, dict[str, float]]:
     try:
         agent = OpenAIEnvironmentAgent()
     except Exception as exc:
         print(f"inference warning: {exc}", file=sys.stderr)
         return _empty_summary()
 
-    summary: dict[str, dict[str, float]] = {}
-    for task_name in ("easy", "medium", "hard"):
-        scores = [
-            _run_scenario(env, agent, scenario.scenario_id)
-            for scenario in scenarios_for_task(task_name)
-        ]
-        if not scores:
-            summary[task_name] = {"mean": 0.0, "min": 0.0, "max": 0.0}
-            continue
-        summary[task_name] = {
-            "mean": round(mean(scores), 4),
-            "min": round(min(scores), 4),
-            "max": round(max(scores), 4),
-        }
+    base_url = os.environ.get("ENV_BASE_URL", "http://127.0.0.1:7860")
+    session_id = f"inference-{seed}-{uuid.uuid4().hex[:8]}"
+    env = HttpEnvironmentClient(base_url=base_url, session_id=session_id)
+    deadline = time.monotonic() + MAX_RUNTIME_SECONDS
+    summary: dict[str, dict[str, float]] = _empty_summary()
+    all_rewards: list[float] = []
+    step_counter = 1
+
+    try:
+        _log_start(task=task, env=BENCHMARK, model=agent.model_name)
+        task_map = env.tasks()
+        if not task_map:
+            print("inference warning: /tasks returned no scenarios.", file=sys.stderr)
+            _log_end(success=False, steps=0, score=0.0, rewards=[])
+            return summary
+        selected_tasks = [task] if task in {"easy", "medium", "hard"} else ["easy", "medium", "hard"]
+        for task_name in selected_tasks:
+            scores: list[float] = []
+            scenario_ids = list(task_map.get(task_name, []))
+            if max_scenarios is not None and max_scenarios > 0:
+                scenario_ids = scenario_ids[:max_scenarios]
+            for scenario_id in scenario_ids:
+                score, timed_out, rewards, step_counter = _run_scenario(
+                    env,
+                    agent,
+                    scenario_id=scenario_id,
+                    deadline=deadline,
+                    step_counter=step_counter,
+                )
+                scores.append(score)
+                all_rewards.extend(rewards)
+                if timed_out:
+                    break
+            if scores:
+                summary[task_name] = {
+                    "mean": round(mean(scores), 4),
+                    "min": round(min(scores), 4),
+                    "max": round(max(scores), 4),
+                }
+            if time.monotonic() >= deadline:
+                break
+    except Exception as exc:
+        print(f"inference warning: environment_http_error error={exc}", file=sys.stderr)
+    finally:
+        env.close()
+    selected_tasks = [task] if task in {"easy", "medium", "hard"} else ["easy", "medium", "hard"]
+    run_score = _summary_score(summary, selected_tasks)
+    _log_end(
+        success=run_score >= SUCCESS_SCORE_THRESHOLD,
+        steps=max(0, step_counter - 1),
+        score=run_score,
+        rewards=[round(value, 4) for value in all_rewards],
+    )
     return summary
 
 
 def main() -> None:
     _load_dotenv()
-    parser = argparse.ArgumentParser(description="Run the OpenAI-backed agent across all environment tasks.")
+    parser = argparse.ArgumentParser(description="Run the OpenAI-backed agent via HTTP against the environment API.")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--task", choices=["easy", "medium", "hard", "all"], default=TASK_NAME)
+    parser.add_argument("--max-scenarios", type=int, default=None, help="Optional cap per task difficulty.")
     args = parser.parse_args()
     try:
-        summary = run(seed=args.seed)
+        summary = run(seed=args.seed, task=args.task, max_scenarios=args.max_scenarios)
     except Exception as exc:  # pragma: no cover - CLI guard
         print(f"inference warning: {exc}", file=sys.stderr)
         summary = _empty_summary()

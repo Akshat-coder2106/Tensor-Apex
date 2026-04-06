@@ -18,6 +18,7 @@ endpoints:
   reset: /reset
   step: /step
   state: /state
+  schema: /schema
   close_session: /session
 session:
   header: X-Session-Id

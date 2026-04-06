@@ -72,8 +72,7 @@ def compute_policy_expectations(
     issue_age_hours: float,
     policy_version: PolicyVersion,
 ) -> PolicyExpectations:
-    latest_message = snapshot.thread[-1]
-    body_text = latest_message.body.lower()
+    body_text = " ".join(message.body.lower() for message in snapshot.thread)
     expectations: PolicyExpectations = {
         "requires_escalation": False,
         "requires_fraud_flag": False,
