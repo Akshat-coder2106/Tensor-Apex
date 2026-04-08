@@ -8,6 +8,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
 from business_policy_env.environment import BusinessPolicyComplianceEnv
+from business_policy_env.landing import build_landing_page
 from business_policy_env.models import Action, Observation, ResetRequest, StepRequest, StepResult
 
 APP_NAME = "Business Policy Compliance and Customer Resolution Environment"
@@ -32,17 +33,7 @@ def _get_or_create(session_id: str) -> BusinessPolicyComplianceEnv:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    return (
-        "<html><body style='font-family:system-ui;padding:24px;background:#0f172a;color:#e2e8f0;'>"
-        "<h2 style='margin:0 0 12px;'>Business Policy Compliance Environment</h2>"
-        "<p style='margin:0 0 10px;'>API server is running.</p>"
-        "<ul>"
-        "<li><a href='/docs' style='color:#7dd3fc;'>OpenAPI docs</a></li>"
-        "<li><a href='/tasks' style='color:#7dd3fc;'>List tasks</a></li>"
-        "<li><a href='/health' style='color:#7dd3fc;'>Health check</a></li>"
-        "</ul>"
-        "</body></html>"
-    )
+    return build_landing_page(app_name=APP_NAME, app_version=APP_VERSION)
 
 
 @app.get("/health")

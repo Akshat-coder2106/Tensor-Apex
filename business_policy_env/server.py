@@ -6,6 +6,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 
 from .environment import BusinessPolicyComplianceEnv
+from .landing import build_landing_page
 from .models import Action, Observation, ResetRequest, StepRequest, StepResult
 
 app = FastAPI(
@@ -29,17 +30,7 @@ def _session_or_default(x_session_id: str | None) -> str:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
-    return (
-        "<html><body style='font-family:system-ui;padding:24px;background:#0f172a;color:#e2e8f0;'>"
-        "<h2 style='margin:0 0 12px;'>Business Policy Compliance Environment</h2>"
-        "<p style='margin:0 0 10px;'>API server is running.</p>"
-        "<ul>"
-        "<li><a href='/docs' style='color:#7dd3fc;'>OpenAPI docs</a></li>"
-        "<li><a href='/tasks' style='color:#7dd3fc;'>List tasks</a></li>"
-        "<li><a href='/health' style='color:#7dd3fc;'>Health check</a></li>"
-        "</ul>"
-        "</body></html>"
-    )
+    return build_landing_page(app_name=app.title, app_version=app.version)
 
 
 @app.get("/health")
