@@ -1,6 +1,9 @@
 import asyncio
+import io
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stdout
+from unittest.mock import patch
 
 import anyio
 import httpx
@@ -233,6 +236,19 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(state_response.status_code, 200)
         self.assertTrue(state_response.json()["active"])
         self.assertIsNone(state_response.json()["ground_truth"])
+
+    def test_tasks_endpoint_exposes_task_specs_and_graders(self) -> None:
+        client = TestClient(app)
+        response = client.get("/tasks")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+
+        self.assertEqual(sorted(payload["task_specs"].keys()), ["easy", "hard", "medium"])
+        self.assertEqual(payload["task_specs"]["easy"]["grader"], "easy_grader")
+        self.assertEqual(payload["task_specs"]["medium"]["grader"], "medium_grader")
+        self.assertEqual(payload["task_specs"]["hard"]["grader"], "hard_grader")
+        self.assertEqual(payload["task_specs"]["easy"]["reward_range"], [0.0, 1.0])
+        self.assertEqual(payload["task_specs"]["hard"]["scenario_count"], len(payload["hard"]))
 
     def test_session_isolation(self) -> None:
         client = TestClient(app)
@@ -534,6 +550,61 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_inference_default_task_is_all(self) -> None:
         self.assertEqual(inference.TASK_NAME, "all")
+
+    def test_inference_all_logs_each_task_separately(self) -> None:
+        class LocalEnvClient:
+            def __init__(self, *, base_url: str, session_id: str) -> None:
+                self._env = BusinessPolicyComplianceEnv(variation_seed=42)
+
+            def close(self) -> None:
+                self._env.close()
+
+            def tasks(self) -> dict[str, list[str] | dict]:
+                return self._env.available_tasks()
+
+            def reset(
+                self,
+                *,
+                task_name: str | None = None,
+                scenario_id: str | None = None,
+                variation_seed: int | None = None,
+            ):
+                return self._env.reset(
+                    task_name=task_name,
+                    scenario_id=scenario_id,
+                    variation_seed=variation_seed,
+                )
+
+            def step(self, action: Action):
+                return self._env.step(action)
+
+        class RuleAgentAdapter:
+            def __init__(self) -> None:
+                self._agent = RuleBasedAgent()
+                self._model = "rule-test-agent"
+
+            @property
+            def model_name(self) -> str:
+                return self._model
+
+            def next_action(self, observation):
+                return self._agent.next_action(observation)
+
+        stdout_buffer = io.StringIO()
+        with (
+            patch.object(inference, "HttpEnvironmentClient", LocalEnvClient),
+            patch.object(inference, "OpenAIEnvironmentAgent", RuleAgentAdapter),
+            redirect_stdout(stdout_buffer),
+        ):
+            inference.run(seed=42, task="all", max_scenarios=1)
+
+        stdout = stdout_buffer.getvalue()
+        self.assertIn("[START] task=easy", stdout)
+        self.assertIn("[START] task=medium", stdout)
+        self.assertIn("[START] task=hard", stdout)
+        self.assertIn("[END] task=easy", stdout)
+        self.assertIn("[END] task=medium", stdout)
+        self.assertIn("[END] task=hard", stdout)
 
     def test_refund_jitter_preserves_threshold_semantics(self) -> None:
         registry = scenario_registry()

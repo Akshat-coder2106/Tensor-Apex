@@ -38,10 +38,19 @@ baseline:
 tasks:
   - name: easy
     objective: Single-turn tickets with clear policy constraints.
+    grader: easy_grader
+    reward_min: 0.0
+    reward_max: 1.0
   - name: medium
     objective: Ambiguous tickets that require request_info before resolution.
+    grader: medium_grader
+    reward_min: 0.0
+    reward_max: 1.0
   - name: hard
     objective: Multi-turn threads with temporal pressure, policy rules, and history-aware responses.
+    grader: hard_grader
+    reward_min: 0.0
+    reward_max: 1.0
 observation:
   attachment_present: bool
   attachment_summary: string

@@ -223,6 +223,25 @@ class StepRequest(BaseModel):
     action: Action
 
 
+class TaskSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Difficulty
+    objective: str
+    grader: str
+    reward_range: tuple[float, float] = (0.0, 1.0)
+    scenario_count: int
+
+
+class TaskCatalog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    easy: list[str] = Field(default_factory=list)
+    medium: list[str] = Field(default_factory=list)
+    hard: list[str] = Field(default_factory=list)
+    task_specs: dict[Difficulty, TaskSpec] = Field(default_factory=dict)
+
+
 class RewardBreakdown(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

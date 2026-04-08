@@ -168,6 +168,15 @@ Important behavior:
 - `/step` requires an existing session (call `/reset` first for that session).
 - `/state` is session-scoped.
 - `/state` hides ground-truth by default; use `/state?include_ground_truth=true` for evaluator/debug mode.
+- `/tasks` returns the three benchmark difficulties plus `task_specs`, which explicitly declares each task objective, grader, reward range, and scenario count.
+
+## Task Catalog
+
+| Task | Objective | Grader | Reward Range |
+| --- | --- | --- | --- |
+| `easy` | Single-turn tickets with clear policy constraints. | `easy_grader` | `0.0-1.0` |
+| `medium` | Ambiguous tickets that require `request_info` before resolution. | `medium_grader` | `0.0-1.0` |
+| `hard` | Multi-turn threads with temporal pressure, policy rules, and history-aware responses. | `hard_grader` | `0.0-1.0` |
 
 ## Gradio Judge UI
 
@@ -197,7 +206,7 @@ Baseline runs are deterministic by default (fixed variation seed). Override with
 For hackathon pre-validation, the root-level inference script is:
 - `inference.py`
 
-It runs a sequential OpenAI-client agent across all `easy`, `medium`, and `hard` scenarios and prints a JSON summary.
+It runs a sequential OpenAI-client agent across `easy`, `medium`, and `hard`, emits structured stdout blocks for each task, and writes the aggregate JSON summary to `inference_results.json`.
 
 Required env vars:
 - `API_BASE_URL`
@@ -213,6 +222,13 @@ python inference.py --seed 42
 ```
 
 The `--seed` value is forwarded to the environment reset path, so HTTP-mode inference stays reproducible across fresh sessions.
+
+Structured stdout format:
+```text
+[START] task=easy env=business-policy-compliance model=openai/gpt-4.1-mini
+[STEP] step=1 action=categorize reward=0.20 done=false error=null
+[END] task=easy score=0.91 steps=3 success=true rewards=0.20,0.33,0.91
+```
 
 ## Project Layout
 

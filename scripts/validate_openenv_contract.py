@@ -33,6 +33,7 @@ def _parse_openenv(path: Path) -> dict[str, Any]:
     endpoints: dict[str, str] = {}
     actions: list[str] = []
     tasks: list[dict[str, str]] = []
+    current_task: dict[str, str] | None = None
 
     current_section: str | None = None
     for line in lines:
@@ -55,7 +56,12 @@ def _parse_openenv(path: Path) -> dict[str, Any]:
         if current_section == "tasks":
             match = re.match(r"^\s{2}-\s*name:\s*(\S+)\s*$", line)
             if match:
-                tasks.append({"name": match.group(1)})
+                current_task = {"name": match.group(1)}
+                tasks.append(current_task)
+                continue
+            grader_match = re.match(r"^\s{4}grader:\s*(\S+)\s*$", line)
+            if grader_match and current_task is not None:
+                current_task["grader"] = grader_match.group(1)
 
     return {"endpoints": endpoints, "actions": actions, "tasks": tasks}
 
@@ -99,9 +105,17 @@ def main() -> None:
         errors.append("tasks must be a list.")
         tasks = []
     task_names = {str(task.get("name")) for task in tasks if isinstance(task, dict)}
+    graders_by_task = {
+        str(task.get("name")): str(task.get("grader", ""))
+        for task in tasks
+        if isinstance(task, dict) and task.get("name") is not None
+    }
     missing_tasks = sorted(REQUIRED_TASKS - task_names)
     if missing_tasks:
         errors.append(f"Missing required task names: {missing_tasks}")
+    missing_graders = sorted(task for task in REQUIRED_TASKS if not graders_by_task.get(task))
+    if missing_graders:
+        errors.append(f"Missing grader declarations for tasks: {missing_graders}")
 
     report = {
         "ok": not errors,
@@ -110,6 +124,7 @@ def main() -> None:
         "app_routes": sorted(app_routes),
         "actions": sorted(action_set),
         "tasks": sorted(task_names),
+        "task_graders": graders_by_task,
         "errors": errors,
     }
     print(json.dumps(report, indent=2))

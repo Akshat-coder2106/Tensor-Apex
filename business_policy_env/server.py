@@ -7,7 +7,8 @@ from fastapi.responses import HTMLResponse
 
 from .environment import BusinessPolicyComplianceEnv
 from .landing import build_landing_page
-from .models import Action, Observation, ResetRequest, StepRequest, StepResult
+from .models import Action, Observation, ResetRequest, StepRequest, StepResult, TaskCatalog
+from .tasks import task_specs
 
 app = FastAPI(
     title="Business Policy Compliance and Customer Resolution Environment",
@@ -38,11 +39,20 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/tasks")
-def tasks(x_session_id: str | None = Header(default=None)) -> dict[str, list[str]]:
+@app.get("/metadata")
+def metadata() -> dict[str, Any]:
+    return {
+        "name": app.title,
+        "description": app.description,
+        "tasks": [spec.model_dump(mode="json") for spec in task_specs().values()],
+    }
+
+
+@app.get("/tasks", response_model=TaskCatalog)
+def tasks(x_session_id: str | None = Header(default=None)) -> TaskCatalog:
     session_id = _session_or_default(x_session_id)
     env = _get_or_create(session_id)
-    return env.available_tasks()
+    return TaskCatalog.model_validate(env.available_tasks())
 
 
 @app.post("/reset", response_model=Observation)
