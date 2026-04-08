@@ -113,7 +113,7 @@ Runtime remains deterministic:
 | Delayed fraud penalty | Fraud flagged too late in delayed-detection scenarios | up to -0.12 | Episode-end proportional penalty by lateness |
 | Early misroute penalty | First categorization mismatches expected route | -0.08 | Episode-end penalty |
 
-Shaped rewards are clamped to `[-1.0, 1.0]` (grader score remains `0.0-1.0`).  
+Shaped rewards are clamped to `[0.0, 1.0]` (grader score remains `0.0-1.0`).  
 Step details are available in `info["reward_breakdown"]`.
 Cost units are normalized operational effort units (roughly comparable to a combined latency/compute/support-minute budget).
 
