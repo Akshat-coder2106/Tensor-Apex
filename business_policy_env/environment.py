@@ -158,6 +158,14 @@ class BusinessPolicyComplianceEnv:
             return "medium"
         return "easy"
 
+    def _configure_variation_seed(self, variation_seed: int | None) -> None:
+        if variation_seed is None:
+            return
+        resolved_seed = int(variation_seed)
+        if resolved_seed != self._variation_seed:
+            self._variation_seed = resolved_seed
+            self._variation_counter = 0
+
     def _clarification_rounds_remaining(self) -> int:
         return max(0, len(self._clarification_rounds) - self._clarification_round_index)
 
@@ -414,7 +422,13 @@ class BusinessPolicyComplianceEnv:
         if self._completion_reached() or self.done:
             self.episode_phase = EpisodePhase.complete
 
-    def reset(self, task_name: str | None = None, scenario_id: str | None = None) -> Observation:
+    def reset(
+        self,
+        task_name: str | None = None,
+        scenario_id: str | None = None,
+        variation_seed: int | None = None,
+    ) -> Observation:
+        self._configure_variation_seed(variation_seed)
         self.current_scenario = self._select_scenario(task_name, scenario_id)
         self.action_history = []
         self._agent_notes = []

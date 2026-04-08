@@ -466,6 +466,32 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(obs_a.refund_amount, obs_b.refund_amount)
         self.assertEqual(obs_a.account_flags, obs_b.account_flags)
 
+    def test_fastapi_reset_accepts_variation_seed(self) -> None:
+        client = TestClient(app)
+        scenario_id = "hard_hidden_risk_policy_shift"
+        headers_a = {"X-Session-Id": "seed_a"}
+        headers_b = {"X-Session-Id": "seed_b"}
+
+        response_a = client.post(
+            "/reset",
+            json={"scenario_id": scenario_id, "variation_seed": 12345},
+            headers=headers_a,
+        )
+        response_b = client.post(
+            "/reset",
+            json={"scenario_id": scenario_id, "variation_seed": 12345},
+            headers=headers_b,
+        )
+
+        self.assertEqual(response_a.status_code, 200)
+        self.assertEqual(response_b.status_code, 200)
+
+        obs_a = response_a.json()
+        obs_b = response_b.json()
+        self.assertEqual(obs_a["issue_age_hours"], obs_b["issue_age_hours"])
+        self.assertEqual(obs_a["refund_amount"], obs_b["refund_amount"])
+        self.assertEqual(obs_a["account_flags"], obs_b["account_flags"])
+
     def test_context_usage_requires_draft_response(self) -> None:
         scenario = scenario_registry()["hard_old_invoice_question"]
         snapshot = scenario.clarification_snapshot or scenario.initial_snapshot

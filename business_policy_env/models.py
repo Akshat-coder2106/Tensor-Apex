@@ -214,6 +214,7 @@ class ResetRequest(BaseModel):
 
     task_name: Difficulty | None = None
     scenario_id: str | None = None
+    variation_seed: int | None = None
 
 
 class StepRequest(BaseModel):

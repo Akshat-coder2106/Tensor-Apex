@@ -168,12 +168,12 @@ Terminal shaping:
 - Deterministic baseline CLI with seed control: `baseline.py --seed 42` (default)
 - OpenEnv contract validation script
 - Docker smoke script for runtime proof
-- 40 targeted tests including async concurrency, proportional delayed-fraud reward checks, action-claim consistency, seeded reproducibility, cross-vertical registration, hard-baseline ceiling checks, memory diagnostics, and episode logging invariants
+- 50 targeted tests including async concurrency, proportional delayed-fraud reward checks, action-claim consistency, seeded reproducibility, HTTP reset reproducibility, cross-vertical registration, hard-baseline ceiling checks, memory diagnostics, attachment evidence handling, and episode logging invariants
 
 Published deterministic baselines (`--seed 42`):
 - Easy: `0.91 ± 0.14`
-- Medium: `0.71 ± 0.12`
-- Hard: `0.49 ± 0.15`
+- Medium: `0.70 ± 0.14`
+- Hard: `0.51 ± 0.15`
 
 ---
 
