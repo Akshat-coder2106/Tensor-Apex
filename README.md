@@ -5,7 +5,7 @@ colorFrom: blue
 colorTo: indigo
 sdk: docker
 app_port: 7860
-short_description: Policy-aware customer resolution environment for OpenEnv agents.
+short_description: Policy-aware customer support OpenEnv benchmark.
 ---
 
 # Business Policy Compliance and Customer Resolution Environment
