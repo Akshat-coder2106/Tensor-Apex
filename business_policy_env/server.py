@@ -62,19 +62,24 @@ def reset(
     session_id = _session_or_default(x_session_id)
     env = _get_or_create(session_id)
     payload = request or ResetRequest()
-    return env.reset(task_name=payload.task_name, scenario_id=payload.scenario_id)
+    return env.reset(
+        task_name=payload.task_name,
+        scenario_id=payload.scenario_id,
+        variation_seed=payload.variation_seed,
+    )
 
 
 @app.get("/reset", response_model=Observation)
 def reset_get(
     task_name: str | None = None,
     scenario_id: str | None = None,
+    variation_seed: int | None = None,
     x_session_id: str | None = Header(default=None),
 ) -> Observation:
     session_id = _session_or_default(x_session_id)
     env = _get_or_create(session_id)
     resolved_task = task_name if task_name in {"easy", "medium", "hard"} else None
-    return env.reset(task_name=resolved_task, scenario_id=scenario_id)
+    return env.reset(task_name=resolved_task, scenario_id=scenario_id, variation_seed=variation_seed)
 
 
 @app.post("/step", response_model=StepResult)

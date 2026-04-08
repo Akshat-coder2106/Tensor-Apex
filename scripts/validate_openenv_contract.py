@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
-from business_policy_env.server import app
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from business_policy_env.server import app  # noqa: E402
 
 REQUIRED_ENDPOINTS = {"health", "tasks", "reset", "step", "state", "schema", "close_session"}
 REQUIRED_TASKS = {"easy", "medium", "hard"}

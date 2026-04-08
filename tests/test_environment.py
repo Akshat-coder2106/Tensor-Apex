@@ -113,7 +113,7 @@ class EnvironmentTests(unittest.TestCase):
     def test_invalid_action_does_not_change_state(self) -> None:
         self.env.reset(scenario_id="easy_vip_refund")
         observation, reward, done, info = self.env.step({"action_type": "categorize", "reasoning": "Missing field"})
-        self.assertEqual(reward, -0.1)
+        self.assertEqual(reward, 0.0)
         self.assertFalse(done)
         self.assertFalse(info["valid_action"])
         self.assertEqual(observation.steps_taken, 0)
@@ -129,7 +129,8 @@ class EnvironmentTests(unittest.TestCase):
             )
         )
         self.assertEqual(observation.steps_taken, 1)
-        self.assertLessEqual(reward, 0.0)
+        self.assertGreaterEqual(reward, 0.0)
+        self.assertLess(reward, 0.2)
         self.assertFalse(done)
         self.assertTrue(info["policy_violations"])
         self.assertEqual(info["reward_breakdown"]["policy_penalty"], -0.2)
@@ -465,6 +466,32 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(obs_a.issue_age_hours, obs_b.issue_age_hours)
         self.assertEqual(obs_a.refund_amount, obs_b.refund_amount)
         self.assertEqual(obs_a.account_flags, obs_b.account_flags)
+
+    def test_fastapi_reset_accepts_variation_seed(self) -> None:
+        client = TestClient(app)
+        scenario_id = "hard_hidden_risk_policy_shift"
+        headers_a = {"X-Session-Id": "seed_a"}
+        headers_b = {"X-Session-Id": "seed_b"}
+
+        response_a = client.post(
+            "/reset",
+            json={"scenario_id": scenario_id, "variation_seed": 12345},
+            headers=headers_a,
+        )
+        response_b = client.post(
+            "/reset",
+            json={"scenario_id": scenario_id, "variation_seed": 12345},
+            headers=headers_b,
+        )
+
+        self.assertEqual(response_a.status_code, 200)
+        self.assertEqual(response_b.status_code, 200)
+
+        obs_a = response_a.json()
+        obs_b = response_b.json()
+        self.assertEqual(obs_a["issue_age_hours"], obs_b["issue_age_hours"])
+        self.assertEqual(obs_a["refund_amount"], obs_b["refund_amount"])
+        self.assertEqual(obs_a["account_flags"], obs_b["account_flags"])
 
     def test_context_usage_requires_draft_response(self) -> None:
         scenario = scenario_registry()["hard_old_invoice_question"]

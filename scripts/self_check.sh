@@ -33,7 +33,7 @@ echo "[5/7] OpenEnv contract validation"
 
 echo "[6/7] OpenEnv validate (if installed)"
 if command -v openenv >/dev/null 2>&1; then
-  openenv validate openenv.yaml
+  openenv validate
 else
   echo "SKIP: openenv CLI not found."
 fi

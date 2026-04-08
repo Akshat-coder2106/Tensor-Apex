@@ -5,7 +5,7 @@ colorFrom: blue
 colorTo: indigo
 sdk: docker
 app_port: 7860
-short_description: Policy-aware customer resolution environment for OpenEnv agents.
+short_description: Policy-aware customer support OpenEnv benchmark.
 ---
 
 # Business Policy Compliance and Customer Resolution Environment
@@ -113,7 +113,7 @@ Runtime remains deterministic:
 | Delayed fraud penalty | Fraud flagged too late in delayed-detection scenarios | up to -0.12 | Episode-end proportional penalty by lateness |
 | Early misroute penalty | First categorization mismatches expected route | -0.08 | Episode-end penalty |
 
-Shaped rewards are clamped to `[-1.0, 1.0]` (grader score remains `0.0-1.0`).  
+Shaped rewards are clamped to `[0.0, 1.0]` (grader score remains `0.0-1.0`).  
 Step details are available in `info["reward_breakdown"]`.
 Cost units are normalized operational effort units (roughly comparable to a combined latency/compute/support-minute budget).
 
@@ -185,10 +185,10 @@ From:
 .venv/bin/python baseline.py --agent rule --seed 42
 ```
 
-Current means (54 scenarios, latest local run):
+Current means (54 scenarios, latest local run on April 8, 2026):
 - Easy: `0.91` (`std 0.1375`, min `0.70`, max `1.00`)
-- Medium: `0.7133` (`std 0.1228`, min `0.4886`, max `0.8560`)
-- Hard: `0.4937` (`std 0.1526`, min `0.1560`, max `0.7519`)
+- Medium: `0.6982` (`std 0.1425`, min `0.49`, max `0.8732`)
+- Hard: `0.5065` (`std 0.1528`, min `0.1693`, max `0.7594`)
 
 Baseline runs are deterministic by default (fixed variation seed). Override with `--seed` when you want alternate perturbation sweeps.
 
@@ -211,6 +211,8 @@ export MODEL_NAME="openai/gpt-4.1-mini"
 export HF_TOKEN="hf_xxx"
 python inference.py --seed 42
 ```
+
+The `--seed` value is forwarded to the environment reset path, so HTTP-mode inference stays reproducible across fresh sessions.
 
 ## Project Layout
 
@@ -305,10 +307,10 @@ CI includes a dedicated `runtime-proof` job that uploads validation/runtime arti
 
 ## Validation Evidence (Latest Local Run)
 
-Pytest (45 targeted tests):
+Pytest (50 targeted tests):
 ```text
-.............................................                            [100%]
-45 passed in 1.42s
+..................................................                       [100%]
+50 passed in 6.82s
 ```
 
 OpenEnv contract validator:

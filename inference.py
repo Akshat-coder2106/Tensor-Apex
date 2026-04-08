@@ -305,12 +305,20 @@ class HttpEnvironmentClient:
             if isinstance(value, list)
         }
 
-    def reset(self, *, task_name: str | None = None, scenario_id: str | None = None) -> Observation:
+    def reset(
+        self,
+        *,
+        task_name: str | None = None,
+        scenario_id: str | None = None,
+        variation_seed: int | None = None,
+    ) -> Observation:
         payload: dict[str, Any] = {}
         if task_name is not None:
             payload["task_name"] = task_name
         if scenario_id is not None:
             payload["scenario_id"] = scenario_id
+        if variation_seed is not None:
+            payload["variation_seed"] = variation_seed
         response = self._client.post("/reset", headers=self._headers, json=payload)
         response.raise_for_status()
         return Observation.model_validate(response.json())
@@ -334,6 +342,7 @@ def _run_scenario(
     agent: OpenAIEnvironmentAgent,
     *,
     scenario_id: str,
+    variation_seed: int,
     deadline: float,
     step_counter: int,
 ) -> tuple[float, bool, list[float], int]:
@@ -343,7 +352,7 @@ def _run_scenario(
         return 0.0, True, [], step_counter + 1
 
     try:
-        observation = env.reset(scenario_id=scenario_id)
+        observation = env.reset(scenario_id=scenario_id, variation_seed=variation_seed)
     except Exception as exc:
         _log_step(step=step_counter, action="reset", reward=0.0, done=True, error=str(exc))
         print(f"inference warning: reset_failed scenario={scenario_id} error={exc}", file=sys.stderr)
@@ -423,6 +432,7 @@ def run(seed: int = 42, task: str = TASK_NAME, max_scenarios: int | None = None)
                     env,
                     agent,
                     scenario_id=scenario_id,
+                    variation_seed=seed,
                     deadline=deadline,
                     step_counter=step_counter,
                 )

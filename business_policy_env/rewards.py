@@ -27,7 +27,7 @@ REASONING_DEPTH_DEEP_BONUS = 0.03
 
 
 def _clamp_reward(value: float) -> float:
-    return max(-1.0, min(1.0, round(value, 4)))
+    return max(0.0, min(1.0, round(value, 4)))
 
 
 def invalid_action_breakdown(message: str) -> RewardBreakdown:
