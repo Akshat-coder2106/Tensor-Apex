@@ -23,6 +23,7 @@ MAX_STEPS = 16
 MAX_TOTAL_REWARD = 10.0
 SUCCESS_SCORE_THRESHOLD = 0.6
 MAX_RUNTIME_SECONDS = 18 * 60
+DEFAULT_ENV_URL = "https://aaditya-03-tensor-apex-openenv.hf.space"
 
 ACTION_REQUIREMENTS: dict[str, str | None] = {
     "categorize": "category",
@@ -50,20 +51,27 @@ def _empty_summary() -> dict[str, dict[str, float]]:
     }
 
 
+def _bool_str(value: bool) -> str:
+    return str(value).lower()
+
+
 def _log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
 def _log_step(step: int, action: str, reward: float, done: bool, error: str | None) -> None:
+    action_clean = action.replace("\n", " ").replace("\r", " ")[:100]
+    error_value = error if error else "null"
     print(
-        f"[STEP] step={step} action={action} reward={round(reward, 4)} done={done} error={error or 'None'}",
+        f"[STEP] step={step} action={action_clean} reward={reward:.2f} done={_bool_str(done)} error={error_value}",
         flush=True,
     )
 
 
 def _log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rewards_text = ",".join(f"{reward:.2f}" for reward in rewards)
     print(
-        f"[END] success={success} steps={steps} score={round(score, 4)} rewards={json.dumps(rewards)}",
+        f"[END] success={_bool_str(success)} steps={steps} score={score:.2f} rewards={rewards_text}",
         flush=True,
     )
 
@@ -217,10 +225,10 @@ def _safe_default_action(observation: Observation) -> Action:
 class OpenAIEnvironmentAgent:
     def __init__(self) -> None:
         client = OpenAI(
-            base_url=os.environ["API_BASE_URL"],
-            api_key=os.environ["HF_TOKEN"],
+            base_url=os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1"),
+            api_key=os.environ.get("HF_TOKEN", "") or "missing-token",
         )
-        model = os.environ["MODEL_NAME"]
+        model = os.environ.get("MODEL_NAME", "openai/gpt-4.1-mini")
         self._client = client.with_options(timeout=12.0, max_retries=0)
         self._model = model
         self._llm_available = True
@@ -400,13 +408,16 @@ def _run_scenario(
 
 
 def run(seed: int = 42, task: str = TASK_NAME, max_scenarios: int | None = None) -> dict[str, dict[str, float]]:
+    model_name = os.environ.get("MODEL_NAME", "openai/gpt-4.1-mini")
+    _log_start(task=task, env=BENCHMARK, model=model_name)
     try:
         agent = OpenAIEnvironmentAgent()
     except Exception as exc:
         print(f"inference warning: {exc}", file=sys.stderr)
+        _log_end(success=False, steps=0, score=0.0, rewards=[])
         return _empty_summary()
 
-    base_url = os.environ.get("ENV_BASE_URL", "http://127.0.0.1:7860")
+    base_url = os.environ.get("ENV_URL") or os.environ.get("ENV_BASE_URL") or DEFAULT_ENV_URL
     session_id = f"inference-{seed}-{uuid.uuid4().hex[:8]}"
     env = HttpEnvironmentClient(base_url=base_url, session_id=session_id)
     deadline = time.monotonic() + MAX_RUNTIME_SECONDS
@@ -415,7 +426,6 @@ def run(seed: int = 42, task: str = TASK_NAME, max_scenarios: int | None = None)
     step_counter = 1
 
     try:
-        _log_start(task=task, env=BENCHMARK, model=agent.model_name)
         task_map = env.tasks()
         if not task_map:
             print("inference warning: /tasks returned no scenarios.", file=sys.stderr)
@@ -474,8 +484,10 @@ def main() -> None:
         summary = run(seed=args.seed, task=args.task, max_scenarios=args.max_scenarios)
     except Exception as exc:  # pragma: no cover - CLI guard
         print(f"inference warning: {exc}", file=sys.stderr)
+        _log_start(task=args.task, env=BENCHMARK, model=os.environ.get("MODEL_NAME", "openai/gpt-4.1-mini"))
+        _log_end(success=False, steps=0, score=0.0, rewards=[])
         summary = _empty_summary()
-    print(json.dumps(summary, indent=2))
+    Path("inference_results.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":
