@@ -376,6 +376,15 @@ curl -X GET /state</pre>
     function formatPayload(path, payload) {{
       if (path === "/tasks" && payload && typeof payload === "object" && !Array.isArray(payload)) {{
         const lines = ["Task Catalog (formatted)"];
+        if (payload.task_specs && typeof payload.task_specs === "object") {{
+          for (const [difficulty, spec] of Object.entries(payload.task_specs)) {{
+            lines.push("");
+            lines.push("- " + difficulty + " :: grader=" + (spec.grader || "unknown"));
+            lines.push("  objective: " + (spec.objective || "n/a"));
+            lines.push("  reward_range: " + JSON.stringify(spec.reward_range || [0.0, 1.0]));
+            lines.push("  scenario_count: " + String(spec.scenario_count ?? 0));
+          }}
+        }}
         for (const [difficulty, scenarios] of Object.entries(payload)) {{
           if (!Array.isArray(scenarios)) continue;
           lines.push("");

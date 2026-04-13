@@ -30,6 +30,7 @@ from .tasks import (
     failure_modes,
     scenario_registry,
     scenarios_for_task,
+    task_specs,
 )
 
 
@@ -59,11 +60,15 @@ class BusinessPolicyComplianceEnv:
         )
         self.done = False
 
-    def available_tasks(self) -> dict[str, list[str]]:
+    def available_tasks(self) -> dict[str, Any]:
         return {
             "easy": [scenario.scenario_id for scenario in scenarios_for_task("easy")],
             "medium": [scenario.scenario_id for scenario in scenarios_for_task("medium")],
             "hard": [scenario.scenario_id for scenario in scenarios_for_task("hard")],
+            "task_specs": {
+                name: spec.model_dump(mode="json")
+                for name, spec in task_specs().items()
+            },
         }
 
     def _select_scenario(self, task_name: str | None, scenario_id: str | None) -> TaskScenario:

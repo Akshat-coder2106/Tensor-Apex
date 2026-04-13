@@ -7,10 +7,22 @@ from functools import lru_cache
 from typing import Any
 
 from .data_generation import build_scenarios
-from .models import Action, PolicyVersion, TaskScenario, TicketSnapshot
+from .models import Action, Difficulty, PolicyVersion, TaskScenario, TaskSpec, TicketSnapshot
 from .policies import policies_satisfied
 
 GroundTruthPayload = dict[str, Any]
+TASK_OBJECTIVES: dict[str, str] = {
+    "easy": "Single-turn tickets with clear policy constraints.",
+    "medium": "Ambiguous tickets that require request_info before resolution.",
+    "hard": "Multi-turn threads with temporal pressure, policy rules, and history-aware responses.",
+}
+TASK_GRADERS: dict[str, str] = {
+    "easy": "easy_grader",
+    "medium": "medium_grader",
+    "hard": "hard_grader",
+}
+TASK_DIFFICULTIES: tuple[Difficulty, Difficulty, Difficulty] = ("easy", "medium", "hard")
+TASK_REWARD_RANGE = (0.0, 1.0)
 WORD_PATTERN = re.compile(r"[a-z0-9]+")
 STOPWORDS = {
     "about",
@@ -106,6 +118,19 @@ def scenarios_for_task(task_name: str | None = None) -> list[TaskScenario]:
         [scenario for scenario in scenarios if scenario.difficulty == task_name],
         key=lambda item: item.scenario_id,
     )
+
+
+def task_specs() -> dict[str, TaskSpec]:
+    return {
+        difficulty: TaskSpec(
+            name=difficulty,
+            objective=TASK_OBJECTIVES[difficulty],
+            grader=TASK_GRADERS[difficulty],
+            reward_range=TASK_REWARD_RANGE,
+            scenario_count=len(scenarios_for_task(difficulty)),
+        )
+        for difficulty in TASK_DIFFICULTIES
+    }
 
 
 def build_ground_truth_payload(

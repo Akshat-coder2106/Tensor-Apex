@@ -9,7 +9,8 @@ from fastapi.responses import HTMLResponse
 
 from business_policy_env.environment import BusinessPolicyComplianceEnv
 from business_policy_env.landing import build_landing_page
-from business_policy_env.models import Action, Observation, ResetRequest, StepRequest, StepResult
+from business_policy_env.models import Action, Observation, ResetRequest, StepRequest, StepResult, TaskCatalog
+from business_policy_env.tasks import task_specs
 
 APP_NAME = "Business Policy Compliance and Customer Resolution Environment"
 APP_DESCRIPTION = (
@@ -42,15 +43,19 @@ def health() -> dict[str, str]:
 
 
 @app.get("/metadata")
-def metadata() -> dict[str, str]:
-    return {"name": APP_NAME, "description": APP_DESCRIPTION}
+def metadata() -> dict[str, Any]:
+    return {
+        "name": APP_NAME,
+        "description": APP_DESCRIPTION,
+        "tasks": [spec.model_dump(mode="json") for spec in task_specs().values()],
+    }
 
 
-@app.get("/tasks")
-def tasks(x_session_id: str | None = Header(default=None)) -> dict[str, list[str]]:
+@app.get("/tasks", response_model=TaskCatalog)
+def tasks(x_session_id: str | None = Header(default=None)) -> TaskCatalog:
     session_id = _session_or_default(x_session_id)
     env = _get_or_create(session_id)
-    return env.available_tasks()
+    return TaskCatalog.model_validate(env.available_tasks())
 
 
 @app.post("/reset", response_model=Observation)
